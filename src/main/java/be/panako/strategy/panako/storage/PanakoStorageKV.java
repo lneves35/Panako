@@ -117,7 +117,7 @@ public class PanakoStorageKV implements PanakoStorage{
         .setMapSize(1024l * 1024l * 1024l * 1024l)//1 TB max!
         .setMaxDbs(2)
         .setMaxReaders(Application.availableProcessors())
-        .open(new File(folder));
+        .open(new File(folder), org.lmdbjava.EnvFlags.MDB_WRITEMAP, org.lmdbjava.EnvFlags.MDB_MAPASYNC);
 		
 		final String fingerprintName = "panako_fingerprints";
 		fingerprints = env.openDbi(fingerprintName, DbiFlags.MDB_CREATE, DbiFlags.MDB_INTEGERKEY, DbiFlags.MDB_DUPSORT, DbiFlags.MDB_DUPFIXED);

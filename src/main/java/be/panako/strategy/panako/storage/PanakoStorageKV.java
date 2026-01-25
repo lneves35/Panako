@@ -103,32 +103,40 @@ public class PanakoStorageKV implements PanakoStorage{
 	 * Create a new storage instance
 	 */
 	public PanakoStorageKV() {
-		String folder = Config.get(Key.PANAKO_LMDB_FOLDER);
-		folder = FileUtils.expandHomeDir(folder);
-		
-		if(!new File(folder).exists()) {
-			FileUtils.mkdirs(folder);
-		}
-		if(!new File(folder).exists()) {
-			throw new RuntimeException("Could not create LMDB folder: " + folder);
-		}
-		
-		env =  org.lmdbjava.Env.create()
-        .setMapSize(1024l * 1024l * 1024l * 1024l)//1 TB max!
+        String folder = Config.get(Key.PANAKO_LMDB_FOLDER);
+        folder = FileUtils.expandHomeDir(folder);
+        
+        if(!new File(folder).exists()) {
+            FileUtils.mkdirs(folder);
+        }
+        if(!new File(folder).exists()) {
+            throw new RuntimeException("Could not create LMDB folder: " + folder);
+        }
+        
+        // MODIFIED: Added MDB_DIRECT and MDB_NORDAHEAD
+        // MDB_DIRECT: Bypasses the OS Page Cache (vital since your DB > RAM)
+        // MDB_NORDAHEAD: Stops the OS from reading extra data you didn't ask for
+        env = org.lmdbjava.Env.create()
+        .setMapSize(1024l * 1024l * 1024l * 1024l) // 1 TB max
         .setMaxDbs(2)
         .setMaxReaders(Application.availableProcessors())
-        .open(new File(folder), org.lmdbjava.EnvFlags.MDB_WRITEMAP, org.lmdbjava.EnvFlags.MDB_MAPASYNC);
-		
-		final String fingerprintName = "panako_fingerprints";
-		fingerprints = env.openDbi(fingerprintName, DbiFlags.MDB_CREATE, DbiFlags.MDB_INTEGERKEY, DbiFlags.MDB_DUPSORT, DbiFlags.MDB_DUPFIXED);
-		
-		final String resourceName = "panako_resource_map";		
-		resourceMap = env.openDbi(resourceName,DbiFlags.MDB_CREATE, DbiFlags.MDB_INTEGERKEY);
-		
-		storeQueue = new HashMap<Long,List<long[]>>();
-		deleteQueue = new HashMap<Long,List<long[]>>();
-		queryQueue = new HashMap<Long,List<Long>>();
-	}
+        .open(new File(folder), 
+            org.lmdbjava.EnvFlags.MDB_WRITEMAP, 
+            org.lmdbjava.EnvFlags.MDB_MAPASYNC,
+            org.lmdbjava.EnvFlags.MDB_DIRECT,    // <--- BYPASS PAGE CACHE
+            org.lmdbjava.EnvFlags.MDB_NORDAHEAD  // <--- REDUCE I/O CONGESTION
+        );
+        
+        final String fingerprintName = "panako_fingerprints";
+        fingerprints = env.openDbi(fingerprintName, DbiFlags.MDB_CREATE, DbiFlags.MDB_INTEGERKEY, DbiFlags.MDB_DUPSORT, DbiFlags.MDB_DUPFIXED);
+        
+        final String resourceName = "panako_resource_map";        
+        resourceMap = env.openDbi(resourceName, DbiFlags.MDB_CREATE, DbiFlags.MDB_INTEGERKEY);
+        
+        storeQueue = new HashMap<Long,List<long[]>>();
+        deleteQueue = new HashMap<Long,List<long[]>>();
+        queryQueue = new HashMap<Long,List<Long>>();
+    }
 
 	/**
 	 * Closes the database environment.

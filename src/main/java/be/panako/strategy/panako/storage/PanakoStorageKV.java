@@ -116,6 +116,7 @@ public class PanakoStorageKV implements PanakoStorage{
         // MODIFIED: Added MDB_DIRECT and MDB_NORDAHEAD
         // MDB_DIRECT: Bypasses the OS Page Cache (vital since your DB > RAM)
         // MDB_NORDAHEAD: Stops the OS from reading extra data you didn't ask for
+        // We use a custom interface to inject the missing native flags (MDB_DIRECT & MDB_NORDAHEAD)
         env = org.lmdbjava.Env.create()
         .setMapSize(1024l * 1024l * 1024l * 1024l) // 1 TB max
         .setMaxDbs(2)
@@ -123,8 +124,9 @@ public class PanakoStorageKV implements PanakoStorage{
         .open(new File(folder), 
             org.lmdbjava.EnvFlags.MDB_WRITEMAP, 
             org.lmdbjava.EnvFlags.MDB_MAPASYNC,
-            org.lmdbjava.EnvFlags.MDB_DIRECT,    // <--- BYPASS PAGE CACHE
-            org.lmdbjava.EnvFlags.MDB_NORDAHEAD  // <--- REDUCE I/O CONGESTION
+            // HACK: Pass the missing flags as raw mask-backed objects
+            (org.lmdbjava.EnvFlags) () -> 0x10,      // MDB_DIRECT
+            (org.lmdbjava.EnvFlags) () -> 0x800000   // MDB_NORDAHEAD
         );
         
         final String fingerprintName = "panako_fingerprints";

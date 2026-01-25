@@ -59,6 +59,8 @@ import be.panako.util.Config;
 import be.panako.util.FileUtils;
 import be.panako.util.Key;
 
+import static org.lmdbjava.MaskedFlag.mask;
+
 /**
  * A storage in a key value store
  */
@@ -113,21 +115,17 @@ public class PanakoStorageKV implements PanakoStorage{
             throw new RuntimeException("Could not create LMDB folder: " + folder);
         }
         
-        // MODIFIED: Added MDB_DIRECT and MDB_NORDAHEAD
-        // MDB_DIRECT: Bypasses the OS Page Cache (vital since your DB > RAM)
-        // MDB_NORDAHEAD: Stops the OS from reading extra data you didn't ask for
-        // We use a custom interface to inject the missing native flags (MDB_DIRECT & MDB_NORDAHEAD)
+        // We calculate the bitmask manually to include MDB_DIRECT (0x10) and MDB_NORDAHEAD (0x800000)
+        int flagsMask = mask(
+            org.lmdbjava.EnvFlags.MDB_WRITEMAP, 
+            org.lmdbjava.EnvFlags.MDB_MAPASYNC
+        ) | 0x10 | 0x800000;
+
         env = org.lmdbjava.Env.create()
         .setMapSize(1024l * 1024l * 1024l * 1024l) // 1 TB max
         .setMaxDbs(2)
         .setMaxReaders(Application.availableProcessors())
-        .open(new File(folder), 
-            org.lmdbjava.EnvFlags.MDB_WRITEMAP, 
-            org.lmdbjava.EnvFlags.MDB_MAPASYNC,
-            // HACK: Pass the missing flags as raw mask-backed objects
-            (org.lmdbjava.EnvFlags) () -> 0x10,      // MDB_DIRECT
-            (org.lmdbjava.EnvFlags) () -> 0x800000   // MDB_NORDAHEAD
-        );
+        .open(new File(folder), flagsMask); // Pass the raw integer mask
         
         final String fingerprintName = "panako_fingerprints";
         fingerprints = env.openDbi(fingerprintName, DbiFlags.MDB_CREATE, DbiFlags.MDB_INTEGERKEY, DbiFlags.MDB_DUPSORT, DbiFlags.MDB_DUPFIXED);

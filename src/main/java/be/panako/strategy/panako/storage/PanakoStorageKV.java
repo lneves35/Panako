@@ -14,7 +14,6 @@ import org.lmdbjava.Cursor;
 import org.lmdbjava.Dbi;
 import org.lmdbjava.DbiFlags;
 import org.lmdbjava.Env;
-import org.lmdbjava.EnvFlags;
 import org.lmdbjava.GetOp;
 import org.lmdbjava.SeekOp;
 import org.lmdbjava.Stat;
@@ -25,11 +24,6 @@ import be.panako.util.Config;
 import be.panako.util.FileUtils;
 import be.panako.util.Key;
 
-import static org.lmdbjava.MaskedFlag.mask;
-
-/**
- * A storage in a key value store optimized for O_DIRECT NVMe performance.
- */
 public class PanakoStorageKV implements PanakoStorage {
     
     private static PanakoStorageKV instance;
@@ -62,18 +56,21 @@ public class PanakoStorageKV implements PanakoStorage {
             FileUtils.mkdirs(folder);
         }
 
-        // 0x10 = MDB_DIRECT, 0x800000 = MDB_NORDAHEAD
-        int flagsMask = mask(
-            EnvFlags.MDB_NOSYNC,
-            EnvFlags.MDB_NOMETASYNC,
-            EnvFlags.MDB_NOTLS
-        ) | 0x10 | 0x800000;
+        /* * RAW FLAG INJECTION (Bypassing Enums)
+         * 0x10     = MDB_DIRECT (The Fix: Bypass Page Cache)
+         * 0x800000 = MDB_NORDAHEAD (The Fix: Disable speculative read)
+         * 0x10000  = MDB_NOSYNC
+         * 0x40000  = MDB_NOMETASYNC
+         * 0x200000 = MDB_NOTLS
+         */
+        int rawFlags = 0x10 | 0x800000 | 0x10000 | 0x40000 | 0x200000;
 
         env = org.lmdbjava.Env.create()
-            .setMapSize(1024L * 1024L * 1024L * 1024L) // 1 TB
-            .setMaxDbs(2)
-            .setMaxReaders(Application.availableProcessors())
-            .open(new File(folder), flagsMask);
+                .setMapSize(1024L * 1024L * 1024L * 1024L) // 1 TB
+                .setMaxDbs(2)
+                .setMaxReaders(Application.availableProcessors())
+                // .open(File, int flags) bypasses enum checks
+                .open(new File(folder), rawFlags);
         
         final String fingerprintName = "panako_fingerprints";
         fingerprints = env.openDbi(fingerprintName, DbiFlags.MDB_CREATE, DbiFlags.MDB_INTEGERKEY, DbiFlags.MDB_DUPSORT, DbiFlags.MDB_DUPFIXED);
@@ -95,11 +92,9 @@ public class PanakoStorageKV implements PanakoStorage {
         byte[] resourcePathBytes = resourcePath.getBytes(StandardCharsets.UTF_8);
         final ByteBuffer val = ByteBuffer.allocateDirect(resourcePathBytes.length + 16); 
         key.putLong(resourceID).flip();
-        
         val.putFloat(duration);
         val.putInt(fingerprintsCount);
         val.put(resourcePathBytes).flip();
-        
         resourceMap.put(key, val);
     }
 
@@ -132,10 +127,9 @@ public class PanakoStorageKV implements PanakoStorage {
         long threadID = Thread.currentThread().getId();
         List<long[]> queue = storeQueue.get(threadID);
         if (queue == null || queue.isEmpty()) return;
-        
         try (Txn<ByteBuffer> txn = env.txnWrite()) {
             final ByteBuffer key = ByteBuffer.allocateDirect(8).order(java.nio.ByteOrder.LITTLE_ENDIAN);
-            final ByteBuffer val = ByteBuffer.allocateDirect(3*4);
+            final ByteBuffer val = ByteBuffer.allocateDirect(12);
             try (Cursor<ByteBuffer> c = fingerprints.openCursor(txn)) {
                 for(long[] data : queue) {
                     key.putLong(data[0]).flip();
@@ -164,10 +158,9 @@ public class PanakoStorageKV implements PanakoStorage {
         long threadID = Thread.currentThread().getId();
         List<long[]> queue = deleteQueue.get(threadID);
         if (queue == null || queue.isEmpty()) return;
-        
         try (Txn<ByteBuffer> txn = env.txnWrite()) {
             final ByteBuffer key = ByteBuffer.allocateDirect(8).order(java.nio.ByteOrder.LITTLE_ENDIAN);
-            final ByteBuffer val = ByteBuffer.allocateDirect(3*4);
+            final ByteBuffer val = ByteBuffer.allocateDirect(12);
             try (Cursor<ByteBuffer> c = fingerprints.openCursor(txn)) {
                 for(long[] data : queue) {
                     key.putLong(data[0]).flip();
@@ -202,32 +195,25 @@ public class PanakoStorageKV implements PanakoStorage {
         long threadID = Thread.currentThread().getId();
         List<Long> queue = queryQueue.get(threadID);
         if (queue == null || queue.isEmpty()) return;
-        
         try (Txn<ByteBuffer> txn = env.txnRead();
              Cursor<ByteBuffer> c = fingerprints.openCursor(txn)) {
-            
             final ByteBuffer keyBuffer = ByteBuffer.allocateDirect(8).order(java.nio.ByteOrder.LITTLE_ENDIAN);
-            
             for(long originalKey : queue) {
                 long startKey = originalKey - range;
                 long stopKey = originalKey + range;
                 keyBuffer.putLong(startKey).flip();
-                
                 if(c.get(keyBuffer, GetOp.MDB_SET_RANGE)) {
                     while(true) {
                         long fingerprintHash = c.key().order(java.nio.ByteOrder.LITTLE_ENDIAN).getLong();
                         if(fingerprintHash > stopKey) break;
-
                         ByteBuffer val = c.val();
                         int resourceID = val.getInt();
                         int t = val.getInt();
                         int f = val.getInt();
-                        
                         if(!resourcesToAvoid.contains(resourceID)) {
                             matchAccumulator.computeIfAbsent(originalKey, k -> new ArrayList<>())
                                             .add(new PanakoHit(originalKey, fingerprintHash, t, resourceID, f));
                         }
-
                         if(!c.seek(SeekOp.MDB_NEXT)) break;
                     }
                 }
@@ -247,7 +233,6 @@ public class PanakoStorageKV implements PanakoStorage {
                 String folder = Config.get(Key.PANAKO_LMDB_FOLDER);
                 String dbpath = FileUtils.combine(folder,"data.mdb");
                 long dbSizeInMB = new File(dbpath).length() / (1024 * 1024);
-                
                 System.out.printf("[MDB INDEX statistics]\n");
                 System.out.printf("=========================\n");
                 System.out.printf("> Size of database page:        %d\n", stats.pageSize);
@@ -257,14 +242,11 @@ public class PanakoStorageKV implements PanakoStorage {
                 System.out.printf("=========================\n\n");
             }
         }
-        
         try (Txn<ByteBuffer> txn = env.txnRead();
              Cursor<ByteBuffer> c = resourceMap.openCursor(txn)) {
-            
             double totalDuration = 0;
             long totalPrints = 0;
             long totalResources = 0;
-            
             while(c.seek(SeekOp.MDB_NEXT)) {
                 ByteBuffer val = c.val();
                 float duration = val.getFloat();
@@ -273,7 +255,6 @@ public class PanakoStorageKV implements PanakoStorage {
                 totalPrints += numFingerprints;
                 totalResources++;
             }
-            
             System.out.printf("[MDB INDEX TOTALS]\n");
             System.out.printf("=========================\n");
             System.out.printf("> %d audio files \n", totalResources);

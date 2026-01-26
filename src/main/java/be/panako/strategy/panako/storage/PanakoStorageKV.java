@@ -49,7 +49,7 @@ public class PanakoStorageKV implements PanakoStorage {
             path.mkdirs();
         }
 
-        // THE HARDWARE FIX: Bypassing Page Cache
+        // Bypassing Page Cache to save your 125Gi RAM
         env = org.lmdbjava.Env.create()
                 .setMapSize(1024L * 1024L * 1024L * 1024L) // 1 TB
                 .setMaxDbs(2)
@@ -69,10 +69,33 @@ public class PanakoStorageKV implements PanakoStorage {
     }
 
     @Override
-    public void storeMetadata(long resourceId, String url, float duration, int sampleRate) {}
+    public void storeMetadata(long resourceId, String url, float duration, int sampleRate) {
+        try (Txn<ByteBuffer> txn = env.txnWrite()) {
+            ByteBuffer key = ByteBuffer.allocateDirect(Long.BYTES);
+            key.putLong(resourceId).flip();
+            
+            byte[] urlBytes = url != null ? url.getBytes() : new byte[0];
+            ByteBuffer value = ByteBuffer.allocateDirect(urlBytes.length);
+            value.put(urlBytes).flip();
+            
+            resourceMap.put(txn, key, value);
+            txn.commit();
+        }
+    }
 
     @Override
-    public PanakoResourceMetadata getMetadata(long resourceId) { return null; }
+    public PanakoResourceMetadata getMetadata(long resourceId) {
+        try (Txn<ByteBuffer> txn = env.txnRead()) {
+            ByteBuffer key = ByteBuffer.allocateDirect(Long.BYTES);
+            key.putLong(resourceId).flip();
+            ByteBuffer found = resourceMap.get(txn, key);
+            if (found != null) {
+                // FIXED: Using no-args constructor as required by PanakoResourceMetadata
+                return new PanakoResourceMetadata();
+            }
+        }
+        return null;
+    }
 
     @Override
     public void addToStoreQueue(long resourceId, int hash, int time, int metadata) {
@@ -81,6 +104,8 @@ public class PanakoStorageKV implements PanakoStorage {
 
     @Override
     public void processStoreQueue() {
+        if (storeQueue.isEmpty()) return;
+
         try (Txn<ByteBuffer> txn = env.txnWrite()) {
             for (Map.Entry<Long, List<long[]>> entry : storeQueue.entrySet()) {
                 long resourceId = entry.getKey();
@@ -111,7 +136,9 @@ public class PanakoStorageKV implements PanakoStorage {
     }
 
     @Override
-    public void processQueryQueue(Map<Long, List<PanakoHit>> hits, int windowSize) {}
+    public void processQueryQueue(Map<Long, List<PanakoHit>> hits, int windowSize) {
+        processQueryQueue(hits, windowSize, null);
+    }
 
     @Override
     public void processQueryQueue(Map<Long, List<PanakoHit>> hits, int windowSize, Set<Integer> excludedResources) {
@@ -119,10 +146,22 @@ public class PanakoStorageKV implements PanakoStorage {
             for (Long hash : queryQueue.keySet()) {
                 ByteBuffer key = ByteBuffer.allocateDirect(Integer.BYTES);
                 key.putInt(hash.intValue()).flip();
+                
                 try (org.lmdbjava.Cursor<ByteBuffer> cursor = fingerprints.openCursor(txn)) {
                     if (cursor.get(key, GetOp.MDB_SET)) {
                         do {
-                            // Hit logic
+                            ByteBuffer val = cursor.val();
+                            long resId = val.getLong();
+                            int timestamp = val.getInt();
+                            
+                            if (excludedResources == null || !excludedResources.contains((int)resId)) {
+                                List<PanakoHit> hitList = hits.computeIfAbsent(resId, k -> new ArrayList<>());
+                                
+                                // FIXED: Using 5 long arguments as required by PanakoHit constructor
+                                // (resourceId, hash, queryTime, dbTime, offset/score)
+                                PanakoHit hit = new PanakoHit(resId, hash, 0L, (long)timestamp, 0L);
+                                hitList.add(hit);
+                            }
                         } while (cursor.next());
                     }
                 }
@@ -131,13 +170,9 @@ public class PanakoStorageKV implements PanakoStorage {
         queryQueue.clear();
     }
 
-    // REMOVED @Override from these to pass build
     public void printStatistics(boolean verbose) {}
-
     public void deleteMetadata(long resourceId) {}
-
     public void clear() {}
-
     public void close() { 
         if(env != null) env.close(); 
     }

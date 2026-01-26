@@ -50,7 +50,7 @@ public class PanakoStorageKV implements PanakoStorage {
             path.mkdirs();
         }
 
-        // THE HARDWARE FIX: Bypassing Page Cache to prioritize SSD speed over RAM bloat
+        // HARDWARE OPTIMIZED: NOSYNC for speed, NORDAHEAD to protect RAM
         env = org.lmdbjava.Env.create()
                 .setMapSize(1024L * 1024L * 1024L * 1024L) // 1 TB
                 .setMaxDbs(2)
@@ -61,8 +61,10 @@ public class PanakoStorageKV implements PanakoStorage {
                     EnvFlags.MDB_NOTLS, 
                     EnvFlags.MDB_NORDAHEAD);
 
-        fingerprints = env.openDbi("panako_fingerprints", DbiFlags.MDB_CREATE, DbiFlags.MDB_INTEGERKEY, DbiFlags.MDB_DUPSORT, DbiFlags.MDB_DUPFIXED);
-        resourceMap = env.openDbi("panako_resource_map", DbiFlags.MDB_CREATE, DbiFlags.MDB_INTEGERKEY);
+        // REMOVED MDB_INTEGERKEY to prevent the "Store Issue" caused by index sort mismatch
+        // Kept DUPSORT as it is required for your fingerprint logic
+        fingerprints = env.openDbi("panako_fingerprints", DbiFlags.MDB_CREATE, DbiFlags.MDB_DUPSORT, DbiFlags.MDB_DUPFIXED);
+        resourceMap = env.openDbi("panako_resource_map", DbiFlags.MDB_CREATE);
 
         storeQueue = new ConcurrentHashMap<>();
         deleteQueue = new ConcurrentHashMap<>();
@@ -72,17 +74,17 @@ public class PanakoStorageKV implements PanakoStorage {
     @Override
     public void storeMetadata(long resourceId, String url, float duration, int sampleRate) {
         try (Txn<ByteBuffer> txn = env.txnWrite()) {
-            // Use LITTLE_ENDIAN to match the C# reader
             ByteBuffer key = ByteBuffer.allocateDirect(8).order(ByteOrder.LITTLE_ENDIAN);
             key.putLong(resourceId).flip();
             
             byte[] urlBytes = url != null ? url.getBytes() : new byte[0];
-            // Value structure: float duration (4) + int sampleRate (4) + url bytes
             ByteBuffer value = ByteBuffer.allocateDirect(urlBytes.length + 8).order(ByteOrder.LITTLE_ENDIAN);
             value.putFloat(duration).putInt(sampleRate).put(urlBytes).flip();
             
             resourceMap.put(txn, key, value);
             txn.commit();
+        } catch (Exception e) {
+            System.err.println("CRITICAL: Metadata Store Failed: " + e.getMessage());
         }
     }
 
@@ -111,11 +113,11 @@ public class PanakoStorageKV implements PanakoStorage {
             for (Map.Entry<Long, List<long[]>> entry : storeQueue.entrySet()) {
                 long resourceId = entry.getKey();
                 for (long[] data : entry.getValue()) {
-                    // Integer Key (Hash) - LITTLE_ENDIAN
+                    // Using 4-byte hash as key in LITTLE_ENDIAN
                     ByteBuffer key = ByteBuffer.allocateDirect(4).order(ByteOrder.LITTLE_ENDIAN);
                     key.putInt((int) data[0]).flip();
                     
-                    // Value (ResourceId + Timestamp) - LITTLE_ENDIAN
+                    // Value: ResourceId (8) + Timestamp (4) = 12 bytes
                     ByteBuffer value = ByteBuffer.allocateDirect(12).order(ByteOrder.LITTLE_ENDIAN);
                     value.putLong(resourceId).putInt((int) data[1]).flip();
                     
@@ -123,6 +125,9 @@ public class PanakoStorageKV implements PanakoStorage {
                 }
             }
             txn.commit();
+        } catch (Exception e) {
+            System.err.println("CRITICAL: Fingerprint Store Failed: " + e.getMessage());
+            e.printStackTrace();
         }
         storeQueue.clear();
     }
@@ -156,12 +161,12 @@ public class PanakoStorageKV implements PanakoStorage {
                     if (cursor.get(key, GetOp.MDB_SET)) {
                         do {
                             ByteBuffer val = cursor.val().order(ByteOrder.LITTLE_ENDIAN);
+                            // We MUST read in the same order we wrote
                             long resId = val.getLong();
                             int timestamp = val.getInt();
                             
                             if (excludedResources == null || !excludedResources.contains((int)resId)) {
                                 List<PanakoHit> hitList = hits.computeIfAbsent(resId, k -> new ArrayList<>());
-                                // (resourceId, hash, queryTime, dbTime, offset)
                                 hitList.add(new PanakoHit(resId, hash, 0L, (long)timestamp, 0L));
                             }
                         } while (cursor.next());

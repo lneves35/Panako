@@ -16,6 +16,7 @@ import org.lmdbjava.EnvFlags;
 import org.lmdbjava.GetOp;
 import org.lmdbjava.PutFlags;
 import org.lmdbjava.Txn;
+import org.lmdbjava.Cursor;
 
 public class PanakoStorageKV implements PanakoStorage {
 
@@ -59,7 +60,7 @@ public class PanakoStorageKV implements PanakoStorage {
                     EnvFlags.MDB_NOTLS, 
                     EnvFlags.MDB_NORDAHEAD);
 
-        // RE-ENABLED MDB_INTEGERKEY: Vital for query speed on large DBs (18GB+)
+        // SPEED FIX: Re-enabling MDB_INTEGERKEY for lightning-fast queries
         fingerprints = env.openDbi("panako_fingerprints", DbiFlags.MDB_CREATE, DbiFlags.MDB_INTEGERKEY, DbiFlags.MDB_DUPSORT, DbiFlags.MDB_DUPFIXED);
         resourceMap = env.openDbi("panako_resource_map", DbiFlags.MDB_CREATE, DbiFlags.MDB_INTEGERKEY);
 
@@ -71,19 +72,23 @@ public class PanakoStorageKV implements PanakoStorage {
     @Override
     public void storeMetadata(long resourceId, String url, float duration, int sampleRate) {
         try (Txn<ByteBuffer> txn = env.txnWrite()) {
-            // Key must be exactly 8 bytes for MDB_INTEGERKEY
+            // Key: 8-byte ResourceID in Little Endian
             ByteBuffer key = ByteBuffer.allocateDirect(8).order(ByteOrder.LITTLE_ENDIAN);
             key.putLong(resourceId).flip();
             
-            byte[] urlBytes = url != null ? url.getBytes() : new byte[0];
-            // Value: float(4) + int(4) + url bytes
-            ByteBuffer value = ByteBuffer.allocateDirect(urlBytes.length + 8).order(ByteOrder.LITTLE_ENDIAN);
-            value.putFloat(duration).putInt(sampleRate).put(urlBytes).flip();
+            byte[] urlBytes = (url != null) ? url.getBytes() : new byte[0];
+            // VALUE ALIGNMENT: Dashboard expects 16 bytes of header + URL
+            ByteBuffer value = ByteBuffer.allocateDirect(urlBytes.length + 16).order(ByteOrder.LITTLE_ENDIAN);
+            value.putFloat(duration);      // 4 bytes
+            value.putInt(sampleRate);      // 4 bytes
+            value.putLong(0L);             // 8 bytes padding (Crucial for 16-byte alignment)
+            value.put(urlBytes);
+            value.flip();
             
             resourceMap.put(txn, key, value);
             txn.commit();
         } catch (Exception e) {
-            System.err.println("CRITICAL: Metadata Store Failed: " + e.getMessage());
+            e.printStackTrace();
         }
     }
 
@@ -130,7 +135,6 @@ public class PanakoStorageKV implements PanakoStorage {
             }
             txn.commit();
         } catch (Exception e) {
-            System.err.println("CRITICAL: Fingerprint Store Failed: " + e.getMessage());
             e.printStackTrace();
         }
         storeQueue.clear();
@@ -158,11 +162,11 @@ public class PanakoStorageKV implements PanakoStorage {
     public void processQueryQueue(Map<Long, List<PanakoHit>> hits, int windowSize, Set<Integer> excludedResources) {
         try (Txn<ByteBuffer> txn = env.txnRead()) {
             for (Long hash : queryQueue.keySet()) {
+                // Querying with 4-byte integer key for speed
                 ByteBuffer key = ByteBuffer.allocateDirect(4).order(ByteOrder.LITTLE_ENDIAN);
                 key.putInt(hash.intValue()).flip();
                 
-                try (org.lmdbjava.Cursor<ByteBuffer> cursor = fingerprints.openCursor(txn)) {
-                    // MDB_SET is fast with INTEGERKEY
+                try (Cursor<ByteBuffer> cursor = fingerprints.openCursor(txn)) {
                     if (cursor.get(key, GetOp.MDB_SET)) {
                         do {
                             ByteBuffer val = cursor.val().order(ByteOrder.LITTLE_ENDIAN);
@@ -184,7 +188,7 @@ public class PanakoStorageKV implements PanakoStorage {
     @Override
     public void printStatistics(boolean verbose) {
         try (Txn<ByteBuffer> txn = env.txnRead()) {
-            try (org.lmdbjava.Cursor<ByteBuffer> c = resourceMap.openCursor(txn)) {
+            try (Cursor<ByteBuffer> c = resourceMap.openCursor(txn)) {
                 double totalDur = 0;
                 long count = 0;
                 while (c.next()) {

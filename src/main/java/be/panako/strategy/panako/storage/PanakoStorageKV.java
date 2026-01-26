@@ -24,10 +24,6 @@ import be.panako.util.Config;
 import be.panako.util.FileUtils;
 import be.panako.util.Key;
 
-/**
- * LMDB Storage implementation for Panako.
- * Synchronized to handle Little Endian byte order for existing 18GB databases.
- */
 public class PanakoStorageKV implements PanakoStorage {
     
     private static PanakoStorageKV instance;
@@ -48,9 +44,9 @@ public class PanakoStorageKV implements PanakoStorage {
     final Dbi<ByteBuffer> resourceMap;
     final Env<ByteBuffer> env;
     
-    final Map<Long, List<long[]>> storeQueue;
-    final Map<Long, List<long[]>> deleteQueue;
-    final Map<Long, List<Long>> queryQueue;
+    final Map<Long, List<long[]>> storeQueue = new HashMap<>();
+    final Map<Long, List<long[]>> deleteQueue = new HashMap<>();
+    final Map<Long, List<Long>> queryQueue = new HashMap<>();
 
     public PanakoStorageKV() {
         String folder = Config.get(Key.PANAKO_LMDB_FOLDER);
@@ -60,19 +56,16 @@ public class PanakoStorageKV implements PanakoStorage {
             FileUtils.mkdirs(folder);
         }
         
+        // LMDB Environment Tuned for 18GB+ / 800M+ items
         env = org.lmdbjava.Env.create()
-            .setMapSize(1024L * 1024L * 1024L * 1024L) // 1 TB
-            .setMaxDbs(2)
-            .setMaxReaders(128) 
+            .setMapSize(2L * 1024L * 1024L * 1024L * 1024L) // 2 TB Map Limit
+            .setMaxDbs(10)
+            .setMaxReaders(512) 
             .open(new File(folder));
         
-        // Critical: Using MDB_INTEGERKEY to match existing Little-Endian DB sort order
+        // Match existing MDB_INTEGERKEY structure
         fingerprints = env.openDbi("panako_fingerprints", DbiFlags.MDB_CREATE, DbiFlags.MDB_INTEGERKEY, DbiFlags.MDB_DUPSORT, DbiFlags.MDB_DUPFIXED);
         resourceMap = env.openDbi("panako_resource_map", DbiFlags.MDB_CREATE, DbiFlags.MDB_INTEGERKEY);
-        
-        storeQueue = new HashMap<>();
-        deleteQueue = new HashMap<>();
-        queryQueue = new HashMap<>();
     }
 
     public void close() {
@@ -94,15 +87,13 @@ public class PanakoStorageKV implements PanakoStorage {
             resourceMap.put(txn, key, val);
             txn.commit();
         } catch (Exception e) {
-            System.err.println("CRITICAL: Metadata store failed for ID " + resourceID);
-            e.printStackTrace();
+            System.err.println("STORE FAILED: Metadata for " + resourceID + " - " + e.getMessage());
         }
         processStoreQueue();
     }
 
     @Override
     public PanakoResourceMetadata getMetadata(long resourceID) {
-        PanakoResourceMetadata metadata = null;
         try (Txn<ByteBuffer> txn = env.txnRead()) {
             final ByteBuffer key = ByteBuffer.allocateDirect(8).order(ByteOrder.LITTLE_ENDIAN);
             key.putLong(resourceID).flip();
@@ -110,23 +101,23 @@ public class PanakoStorageKV implements PanakoStorage {
             
             if(found != null) {
                 found.order(ByteOrder.LITTLE_ENDIAN);
-                metadata = new PanakoResourceMetadata();
+                PanakoResourceMetadata metadata = new PanakoResourceMetadata();
                 metadata.duration = found.getFloat();
                 metadata.numFingerprints = found.getInt();
                 metadata.path = StandardCharsets.UTF_8.decode(found).toString();
                 metadata.identifier = (int) resourceID;
+                return metadata;
             }
         } catch(Exception e) {
             e.printStackTrace();
         }
-        return metadata;    
+        return null;    
     }
 
     @Override
     public void addToStoreQueue(long fingerprintHash, int resourceIdentifier, int t1, int f1) {
         long[] data = {fingerprintHash, (long)resourceIdentifier, (long)t1, (long)f1};
-        long threadID = Thread.currentThread().getId();
-        storeQueue.computeIfAbsent(threadID, k -> new ArrayList<>()).add(data);
+        storeQueue.computeIfAbsent(Thread.currentThread().getId(), k -> new ArrayList<>()).add(data);
     }
 
     @Override
@@ -151,15 +142,14 @@ public class PanakoStorageKV implements PanakoStorage {
             txn.commit();
             queue.clear();
         } catch (Exception e) {
-            e.printStackTrace();
+            System.err.println("STORE QUEUE FAILED: " + e.getMessage());
         }
     }
 
     @Override
     public void addToDeleteQueue(long fingerprintHash, int resourceIdentifier, int t1, int f1) {
         long[] data = {fingerprintHash, (long)resourceIdentifier, (long)t1, (long)f1};
-        long threadID = Thread.currentThread().getId();
-        deleteQueue.computeIfAbsent(threadID, k -> new ArrayList<>()).add(data);
+        deleteQueue.computeIfAbsent(Thread.currentThread().getId(), k -> new ArrayList<>()).add(data);
     }
 
     @Override
@@ -191,8 +181,7 @@ public class PanakoStorageKV implements PanakoStorage {
 
     @Override
     public void addToQueryQueue(long queryHash) {
-        long threadID = Thread.currentThread().getId();
-        queryQueue.computeIfAbsent(threadID, k -> new ArrayList<>()).add(queryHash);
+        queryQueue.computeIfAbsent(Thread.currentThread().getId(), k -> new ArrayList<>()).add(queryHash);
     }
 
     @Override
@@ -257,11 +246,14 @@ public class PanakoStorageKV implements PanakoStorage {
                 long totalResources = 0;
                 while(c.next()) {
                     ByteBuffer v = c.val().order(ByteOrder.LITTLE_ENDIAN);
-                    float duration = v.getFloat();
-                    if(!Float.isNaN(duration)) {
-                        totalDuration += duration;
+                    float d = v.getFloat();
+                    
+                    // Sanity check to filter out corrupt/legacy byte-swap values
+                    if (!Float.isNaN(d) && !Float.isInfinite(d) && d > 0 && d < 1000000) {
+                        totalDuration += d;
                     }
-                    // Handle fingerprint count as unsigned int to avoid negative stats
+                    
+                    // Force unsigned handling for fingerprint counts
                     totalPrints += (v.getInt() & 0xFFFFFFFFL);
                     totalResources++;
                 }

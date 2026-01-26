@@ -20,11 +20,14 @@ import org.lmdbjava.SeekOp;
 import org.lmdbjava.Stat;
 import org.lmdbjava.Txn;
 
-import be.panako.cli.Application;
 import be.panako.util.Config;
 import be.panako.util.FileUtils;
 import be.panako.util.Key;
 
+/**
+ * LMDB Storage implementation for Panako.
+ * Synchronized to handle Little Endian byte order for existing 18GB databases.
+ */
 public class PanakoStorageKV implements PanakoStorage {
     
     private static PanakoStorageKV instance;
@@ -57,14 +60,13 @@ public class PanakoStorageKV implements PanakoStorage {
             FileUtils.mkdirs(folder);
         }
         
-        // LMDB-Java requires explicit map size and transaction management
         env = org.lmdbjava.Env.create()
             .setMapSize(1024L * 1024L * 1024L * 1024L) // 1 TB
             .setMaxDbs(2)
             .setMaxReaders(128) 
             .open(new File(folder));
         
-        // Critical: Using MDB_INTEGERKEY to match your existing 18GB database structure
+        // Critical: Using MDB_INTEGERKEY to match existing Little-Endian DB sort order
         fingerprints = env.openDbi("panako_fingerprints", DbiFlags.MDB_CREATE, DbiFlags.MDB_INTEGERKEY, DbiFlags.MDB_DUPSORT, DbiFlags.MDB_DUPFIXED);
         resourceMap = env.openDbi("panako_resource_map", DbiFlags.MDB_CREATE, DbiFlags.MDB_INTEGERKEY);
         
@@ -79,7 +81,6 @@ public class PanakoStorageKV implements PanakoStorage {
     
     @Override
     public void storeMetadata(long resourceID, String resourcePath, float duration, int fingerprintsCount) {
-        // FIX: Added .order(ByteOrder.LITTLE_ENDIAN)
         final ByteBuffer key = ByteBuffer.allocateDirect(8).order(ByteOrder.LITTLE_ENDIAN);
         byte[] resourcePathBytes = resourcePath.getBytes(StandardCharsets.UTF_8);
         final ByteBuffer val = ByteBuffer.allocateDirect(resourcePathBytes.length + 16).order(ByteOrder.LITTLE_ENDIAN); 
@@ -93,9 +94,9 @@ public class PanakoStorageKV implements PanakoStorage {
             resourceMap.put(txn, key, val);
             txn.commit();
         } catch (Exception e) {
+            System.err.println("CRITICAL: Metadata store failed for ID " + resourceID);
             e.printStackTrace();
         }
-        
         processStoreQueue();
     }
 
@@ -103,13 +104,11 @@ public class PanakoStorageKV implements PanakoStorage {
     public PanakoResourceMetadata getMetadata(long resourceID) {
         PanakoResourceMetadata metadata = null;
         try (Txn<ByteBuffer> txn = env.txnRead()) {
-            // FIX: Added .order(ByteOrder.LITTLE_ENDIAN)
             final ByteBuffer key = ByteBuffer.allocateDirect(8).order(ByteOrder.LITTLE_ENDIAN);
             key.putLong(resourceID).flip();
             final ByteBuffer found = resourceMap.get(txn, key);
             
             if(found != null) {
-                // Important: The returned buffer must be read in Little Endian
                 found.order(ByteOrder.LITTLE_ENDIAN);
                 metadata = new PanakoResourceMetadata();
                 metadata.duration = found.getFloat();
@@ -134,7 +133,6 @@ public class PanakoStorageKV implements PanakoStorage {
     public void processStoreQueue() {
         long threadID = Thread.currentThread().getId();
         List<long[]> queue = storeQueue.get(threadID);
-        
         if (queue == null || queue.isEmpty()) return;
         
         try (Txn<ByteBuffer> txn = env.txnWrite()) {
@@ -219,7 +217,6 @@ public class PanakoStorageKV implements PanakoStorage {
                     
                     if(c.get(keyBuffer, GetOp.MDB_SET_RANGE)) {
                         do {
-                            // Ensure key is read as Little Endian
                             long hash = c.key().order(ByteOrder.LITTLE_ENDIAN).getLong();
                             if (hash > stopKey) break;
 
@@ -246,9 +243,8 @@ public class PanakoStorageKV implements PanakoStorage {
     @Override
     public void printStatistics(boolean detailedStats) {
         try (Txn<ByteBuffer> txn = env.txnRead()) {
-            Stat stats = fingerprints.stat(txn);
-            
             if(detailedStats) {
+                Stat stats = fingerprints.stat(txn);
                 System.out.printf("[MDB INDEX statistics]\n");
                 System.out.printf("=========================\n");
                 System.out.printf("> Number of items: %d\n", stats.entries);
@@ -259,18 +255,16 @@ public class PanakoStorageKV implements PanakoStorage {
                 double totalDuration = 0;
                 long totalPrints = 0;
                 long totalResources = 0;
-                
                 while(c.next()) {
-                    // FIX: Set order to LITTLE_ENDIAN for the value buffer
                     ByteBuffer v = c.val().order(ByteOrder.LITTLE_ENDIAN);
                     float duration = v.getFloat();
-                    int numFingerprints = v.getInt();
-                    
-                    totalDuration += duration;
-                    totalPrints += numFingerprints;
+                    if(!Float.isNaN(duration)) {
+                        totalDuration += duration;
+                    }
+                    // Handle fingerprint count as unsigned int to avoid negative stats
+                    totalPrints += (v.getInt() & 0xFFFFFFFFL);
                     totalResources++;
                 }
-                
                 System.out.printf("[MDB INDEX TOTALS]\n");
                 System.out.printf("=========================\n");
                 System.out.printf("> %d audio files \n", totalResources);
@@ -286,13 +280,9 @@ public class PanakoStorageKV implements PanakoStorage {
     @Override
     public void deleteMetadata(long resourceID) {   
         try (Txn<ByteBuffer> txn = env.txnWrite()) {
-            // FIX: Added .order(ByteOrder.LITTLE_ENDIAN)
             final ByteBuffer key = ByteBuffer.allocateDirect(8).order(ByteOrder.LITTLE_ENDIAN);
             key.putLong(resourceID).flip();
-            
-            if (resourceMap.get(txn, key) != null) {
-                resourceMap.delete(txn, key);
-            }
+            resourceMap.delete(txn, key);
             txn.commit();
         } catch (Exception e) {
             e.printStackTrace();
@@ -307,10 +297,7 @@ public class PanakoStorageKV implements PanakoStorage {
         if (FileUtils.exists(folder)) {
             File[] files = new File(folder).listFiles();
             if (files != null) {
-                for (File f : files) {
-                    FileUtils.rm(f.getAbsolutePath());
-                    System.out.println("Removed " + f.getAbsolutePath());
-                }
+                for (File f : files) FileUtils.rm(f.getAbsolutePath());
             }
         }
     }

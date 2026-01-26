@@ -1,35 +1,35 @@
 /***************************************************************************
-*                                                                          *
-* Panako - acoustic fingerprinting                                         *
-* Copyright (C) 2014 - 2022 - Joren Six / IPEM                             *
-*                                                                          *
-* This program is free software: you can redistribute it and/or modify     *
-* it under the terms of the GNU Affero General Public License as           *
-* published by the Free Software Foundation, either version 3 of the       *
-* License, or (at your option) any later version.                          *
-*                                                                          *
-* This program is distributed in the hope that it will be useful,          *
-* but WITHOUT ANY WARRANTY; without even the implied warranty of           *
-* MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the            *
-* GNU Affero General Public License for more details.                      *
-*                                                                          *
+* *
+* Panako - acoustic fingerprinting                                          *
+* Copyright (C) 2014 - 2022 - Joren Six / IPEM                              *
+* *
+* This program is free software: you can redistribute it and/or modify      *
+* it under the terms of the GNU Affero General Public License as            *
+* published by the Free Software Foundation, either version 3 of the        *
+* License, or (at your option) any later version.                           *
+* *
+* This program is distributed in the hope that it will be useful,           *
+* but WITHOUT ANY WARRANTY; without even the implied warranty of            *
+* MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the             *
+* GNU Affero General Public License for more details.                       *
+* *
 * You should have received a copy of the GNU Affero General Public License *
-* along with this program.  If not, see <http://www.gnu.org/licenses/>     *
-*                                                                          *
+* along with this program.  If not, see <http://www.gnu.org/licenses/>      *
+* *
 ****************************************************************************
-*    ______   ________   ___   __    ________   ___   ___   ______         *
-*   /_____/\ /_______/\ /__/\ /__/\ /_______/\ /___/\/__/\ /_____/\        *
-*   \:::_ \ \\::: _  \ \\::\_\\  \ \\::: _  \ \\::.\ \\ \ \\:::_ \ \       *
-*    \:(_) \ \\::(_)  \ \\:. `-\  \ \\::(_)  \ \\:: \/_) \ \\:\ \ \ \      *
-*     \: ___\/ \:: __  \ \\:. _    \ \\:: __  \ \\:. __  ( ( \:\ \ \ \     *
-*      \ \ \    \:.\ \  \ \\. \`-\  \ \\:.\ \  \ \\: \ )  \ \ \:\_\ \ \    *
-*       \_\/     \__\/\__\/ \__\/ \__\/ \__\/\__\/ \__\/\__\/  \_____\/    *
-*                                                                          *
+* ______   ________   ___   __   ________   ___   ___   ______         *
+* /_____/\ /_______/\ /__/\ /__/\ /_______/\ /___/\/__/\ /_____/\        *
+* \:::_ \ \\::: _  \ \\::\_\\  \ \\::: _  \ \\::.\ \\ \ \\:::_ \ \       *
+* \:(_) \ \\::(_)  \ \\:. `-\  \ \\::(_)  \ \\:: \/_) \ \\:\ \ \ \      *
+* \: ___\/ \:: __  \ \\:. _   \ \\:: __  \ \\:. __  ( ( \:\ \ \ \     *
+* \ \ \    \:.\ \  \ \\. \`-\  \ \\:.\ \  \ \\: \ )  \ \ \:\_\ \ \    *
+* \_\/     \__\/\__\/ \__\/ \__\/ \__\/\__\/ \__\/\__\/  \_____\/    *
+* *
 ****************************************************************************
-*                                                                          *
-*                              Panako                                      *
-*                       Acoustic Fingerprinting                            *
-*                                                                          *
+* *
+* Panako                                      *
+* Acoustic Fingerprinting                            *
+* *
 ****************************************************************************/
 
 
@@ -49,6 +49,7 @@ import org.lmdbjava.Cursor;
 import org.lmdbjava.Dbi;
 import org.lmdbjava.DbiFlags;
 import org.lmdbjava.Env;
+import org.lmdbjava.EnvFlags;
 import org.lmdbjava.GetOp;
 import org.lmdbjava.SeekOp;
 import org.lmdbjava.Stat;
@@ -77,7 +78,7 @@ public class PanakoStorageKV implements PanakoStorage{
 	/**
 	 * Uses a singleton pattern.
 	 * @return Returns or creates a storage instance. This should be a thread
-	 *         safe operation.
+	 * safe operation.
 	 */
 	public synchronized static PanakoStorageKV getInstance() {
 		if (instance == null) {
@@ -117,7 +118,11 @@ public class PanakoStorageKV implements PanakoStorage{
         .setMapSize(1024l * 1024l * 1024l * 1024l)//1 TB max!
         .setMaxDbs(2)
         .setMaxReaders(Application.availableProcessors())
-        .open(new File(folder));
+        .open(new File(folder), 
+        	EnvFlags.MDB_NOSYNC, 
+        	EnvFlags.MDB_NOMETASYNC, 
+        	EnvFlags.MDB_NOTLS, 
+        	EnvFlags.MDB_NORDAHEAD);
 		
 		final String fingerprintName = "panako_fingerprints";
 		fingerprints = env.openDbi(fingerprintName, DbiFlags.MDB_CREATE, DbiFlags.MDB_INTEGERKEY, DbiFlags.MDB_DUPSORT, DbiFlags.MDB_DUPFIXED);

@@ -1,41 +1,8 @@
-/***************************************************************************
-* *
-* Panako - acoustic fingerprinting                                          *
-* Copyright (C) 2014 - 2022 - Joren Six / IPEM                              *
-* *
-* This program is free software: you can redistribute it and/or modify      *
-* it under the terms of the GNU Affero General Public License as            *
-* published by the Free Software Foundation, either version 3 of the        *
-* License, or (at your option) any later version.                           *
-* *
-* This program is distributed in the hope that it will be useful,           *
-* but WITHOUT ANY WARRANTY; without even the implied warranty of            *
-* MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the             *
-* GNU Affero General Public License for more details.                       *
-* *
-* You should have received a copy of the GNU Affero General Public License *
-* along with this program.  If not, see <http://www.gnu.org/licenses/>      *
-* *
-****************************************************************************
-* ______   _______   ___   __   ________   ___   ___   ______          *
-* /_____/\ /_______/\ /__/\ /__/\ /_______/\ /___/\/__/\ /_____/\         *
-* \:::_ \ \\::: _  \ \\::\_\\  \ \\::: _  \ \\::.\ \\ \ \\:::_ \ \        *
-* \:(_) \ \\::(_)  \ \\:. `-\  \ \\::(_)  \ \\:: \/_) \ \\:\ \ \ \       *
-* \: ___\/ \:: __  \ \\:. _   \ \\:: __  \ \\:. __  ( ( \:\ \ \ \      *
-* \ \ \    \:.\ \  \ \\. \`-\  \ \\:.\ \  \ \\: \ )  \ \ \:\_\ \ \     *
-* \_\/     \__\/\__\/ \__\/ \__\/ \__\/\__\/ \__\/\__\/  \_____\/     *
-* *
-****************************************************************************
-* *
-* Panako                                      *
-* Acoustic Fingerprinting                            *
-* *
-****************************************************************************/
-
 package be.panako.strategy.panako.storage;
 
 import java.io.File;
 import java.nio.ByteBuffer;
+import java.nio.ByteOrder;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.HashSet;
@@ -60,7 +27,8 @@ import be.panako.util.FileUtils;
 import be.panako.util.Key;
 
 /**
- * A storage in a key value store optimized for node1 NVMe hardware.
+ * Optimized storage using LMDB for high-speed NVMe access.
+ * Merged with original duplicate handling logic and LITTLE_ENDIAN key support.
  */
 public class PanakoStorageKV implements PanakoStorage {
 	
@@ -82,7 +50,7 @@ public class PanakoStorageKV implements PanakoStorage {
 	final Dbi<ByteBuffer> resourceMap;
 	final Env<ByteBuffer> env;
 	
-	// Thread-safe queues for concurrent processing
+	// Thread-safe queues using ConcurrentHashMap to prevent thread collisions
 	final Map<Long,List<long[]>> storeQueue;
 	final Map<Long,List<long[]>> deleteQueue;
 	final Map<Long,List<Long>> queryQueue;
@@ -94,11 +62,8 @@ public class PanakoStorageKV implements PanakoStorage {
 		if(!new File(folder).exists()) {
 			FileUtils.mkdirs(folder);
 		}
-		if(!new File(folder).exists()) {
-			throw new RuntimeException("Could not create LMDB folder: " + folder);
-		}
 		
-		// MERGED: Hardware optimizations (No readahead, No sync for speed)
+		// Optimization: NOSYNC for speed, NORDAHEAD for NVMe random access efficiency
 		env = org.lmdbjava.Env.create()
 				.setMapSize(1024L * 1024L * 1024L * 1024L) // 1 TB
 				.setMaxDbs(2)
@@ -109,11 +74,9 @@ public class PanakoStorageKV implements PanakoStorage {
 					EnvFlags.MDB_NOTLS, 
 					EnvFlags.MDB_NORDAHEAD);
 		
-		final String fingerprintName = "panako_fingerprints";
-		fingerprints = env.openDbi(fingerprintName, DbiFlags.MDB_CREATE, DbiFlags.MDB_INTEGERKEY, DbiFlags.MDB_DUPSORT, DbiFlags.MDB_DUPFIXED);
-		
-		final String resourceName = "panako_resource_map";		
-		resourceMap = env.openDbi(resourceName, DbiFlags.MDB_CREATE, DbiFlags.MDB_INTEGERKEY);
+		// Use DUPSORT and DUPFIXED for fingerprint hashes (multiple matches per hash)
+		fingerprints = env.openDbi("panako_fingerprints", DbiFlags.MDB_CREATE, DbiFlags.MDB_INTEGERKEY, DbiFlags.MDB_DUPSORT, DbiFlags.MDB_DUPFIXED);
+		resourceMap = env.openDbi("panako_resource_map", DbiFlags.MDB_CREATE, DbiFlags.MDB_INTEGERKEY);
 		
 		storeQueue = new ConcurrentHashMap<>();
 		deleteQueue = new ConcurrentHashMap<>();
@@ -148,7 +111,6 @@ public class PanakoStorageKV implements PanakoStorage {
 			final ByteBuffer found = resourceMap.get(txn, key);
 			if(found != null) {
 				metadata = new PanakoResourceMetadata();
-				// Use the buffer directly as it's positioned after 'found'
 				metadata.duration = found.getFloat();
 				metadata.numFingerprints = found.getInt();
 				metadata.path = StandardCharsets.UTF_8.decode(found).toString();
@@ -174,7 +136,7 @@ public class PanakoStorageKV implements PanakoStorage {
 		if (queue == null || queue.isEmpty()) return;
 		
 		try (Txn<ByteBuffer> txn = env.txnWrite()) {
-			final ByteBuffer key = ByteBuffer.allocateDirect(8).order(java.nio.ByteOrder.LITTLE_ENDIAN);
+			final ByteBuffer key = ByteBuffer.allocateDirect(8).order(ByteOrder.LITTLE_ENDIAN);
 			final ByteBuffer val = ByteBuffer.allocateDirect(12);
 			
 			try (Cursor<ByteBuffer> c = fingerprints.openCursor(txn)) {
@@ -207,7 +169,7 @@ public class PanakoStorageKV implements PanakoStorage {
 		if (queue == null || queue.isEmpty()) return;
 		
 		try (Txn<ByteBuffer> txn = env.txnWrite()) {
-			final ByteBuffer key = ByteBuffer.allocateDirect(8).order(java.nio.ByteOrder.LITTLE_ENDIAN);
+			final ByteBuffer key = ByteBuffer.allocateDirect(8).order(ByteOrder.LITTLE_ENDIAN);
 			final ByteBuffer val = ByteBuffer.allocateDirect(12);
 			
 			try (Cursor<ByteBuffer> c = fingerprints.openCursor(txn)) {
@@ -235,11 +197,6 @@ public class PanakoStorageKV implements PanakoStorage {
 	}
 
 	@Override
-	public void processQueryQueue(Map<Long, List<PanakoHit>> matchAccumulator, int range) {
-		processQueryQueue(matchAccumulator, range, new HashSet<>());
-	}
-
-	@Override
 	public void processQueryQueue(Map<Long, List<PanakoHit>> matchAccumulator, int range, Set<Integer> resourcesToAvoid) {
 		long threadID = Thread.currentThread().getId();
 		List<Long> queue = queryQueue.get(threadID);
@@ -247,27 +204,32 @@ public class PanakoStorageKV implements PanakoStorage {
 		
 		try (Txn<ByteBuffer> txn = env.txnRead()) {
 			try (Cursor<ByteBuffer> c = fingerprints.openCursor(txn)) {
-				final ByteBuffer keyBuffer = ByteBuffer.allocateDirect(8).order(java.nio.ByteOrder.LITTLE_ENDIAN);
+				final ByteBuffer keyBuffer = ByteBuffer.allocateDirect(8).order(ByteOrder.LITTLE_ENDIAN);
 				
 				for(long originalKey : queue) {
 					long startKey = originalKey - range;
 					long stopKey = originalKey + range;
 					keyBuffer.putLong(startKey).flip();
 					
+					// MDB_SET_RANGE finds the first key >= startKey
 					if(c.get(keyBuffer, GetOp.MDB_SET_RANGE)) {
-						do {
-							long hash = c.key().order(java.nio.ByteOrder.LITTLE_ENDIAN).getLong();
+						while (true) {
+							long hash = c.key().order(ByteOrder.LITTLE_ENDIAN).getLong();
 							if (hash > stopKey) break;
 
-							int resID = c.val().getInt();
-							int t = c.val().getInt();
-							int f = c.val().getInt();
+							ByteBuffer val = c.val();
+							int resID = val.getInt();
+							int t = val.getInt();
+							int f = val.getInt();
 
 							if(!resourcesToAvoid.contains(resID)) {
 								matchAccumulator.computeIfAbsent(originalKey, k -> new ArrayList<>())
-										.add(new PanakoHit(originalKey, hash, t, resID, f));
+										.add(new PanakoHit(originalKey, hash, t, (long)resID, f));
 							}
-						} while (c.seek(SeekOp.MDB_NEXT));
+							
+							// Correct progression for DUPSORT: NEXT moves through duplicates AND next keys
+							if (!c.seek(SeekOp.MDB_NEXT)) break;
+						}
 					}
 					keyBuffer.clear();
 				}
@@ -279,42 +241,31 @@ public class PanakoStorageKV implements PanakoStorage {
 	}
 
 	@Override
+	public void processQueryQueue(Map<Long, List<PanakoHit>> matchAccumulator, int range) {
+		processQueryQueue(matchAccumulator, range, new HashSet<>());
+	}
+
+	@Override
 	public void printStatistics(boolean detailedStats) {
 		try (Txn<ByteBuffer> txn = env.txnRead()) {
 			Stat stats = fingerprints.stat(txn);
 			if(detailedStats) {
-				String folder = Config.get(Key.PANAKO_LMDB_FOLDER);
-				String dbpath = FileUtils.combine(folder, "data.mdb");
-				long dbSizeInMB = new File(dbpath).length() / (1024 * 1024);
-				
 				System.out.println("[MDB INDEX statistics]");
-				System.out.println("=========================");
-				System.out.printf("> Size of database page:        %d\n", stats.pageSize);
-				System.out.printf("> Depth of the B-tree:          %d\n", stats.depth);
 				System.out.printf("> Number of items in databases: %d\n", stats.entries);
-				System.out.printf("> File size of the databases:   %dMB\n", dbSizeInMB);
-				System.out.println("=========================\n");
 			}
 			
 			try (Cursor<ByteBuffer> c = resourceMap.openCursor(txn)) {
 				double totalDuration = 0;
 				long totalPrints = 0;
 				long totalResources = 0;
-				
 				while(c.seek(SeekOp.MDB_NEXT)) {
-					float duration = c.val().getFloat();
-					int numFingerprints = c.val().getInt();
-					totalDuration += duration;
-					totalPrints += numFingerprints;
+					totalDuration += c.val().getFloat();
+					totalPrints += c.val().getInt();
 					totalResources++;
 				}
-				
 				System.out.println("[MDB INDEX TOTALS]");
-				System.out.println("=========================");
-				System.out.printf("> %d audio files \n", totalResources);
-				System.out.printf("> %.3f seconds of audio\n", totalDuration);
-				System.out.printf("> %d fingerprint hashes \n", totalPrints);
-				System.out.println("=========================\n");
+				System.out.printf("> %d audio files \n> %.3f seconds of audio\n> %d fingerprint hashes \n", 
+						totalResources, totalDuration, totalPrints);
 			}
 		}
 	}

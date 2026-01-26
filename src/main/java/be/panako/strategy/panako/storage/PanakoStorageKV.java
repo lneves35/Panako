@@ -31,6 +31,7 @@ import be.panako.util.Key;
  * Legacy Compatible version:
  * - resource_map: Big Endian (Java Default)
  * - fingerprints: Little Endian
+ * * This version is optimized for NVMe storage and high-concurrency environments.
  */
 public class PanakoStorageKV implements PanakoStorage {
     
@@ -38,7 +39,7 @@ public class PanakoStorageKV implements PanakoStorage {
     private static final Object mutex = new Object();
 
     /**
-     * Singleton access.
+     * Singleton pattern to ensure only one environment is open.
      */
     public synchronized static PanakoStorageKV getInstance() {
         if (instance == null) {
@@ -55,7 +56,7 @@ public class PanakoStorageKV implements PanakoStorage {
     private final Dbi<ByteBuffer> resourceMap;
     private final Env<ByteBuffer> env;
     
-    // Thread-safe queues to prevent concurrent modification exceptions
+    // Thread-safe queues to prevent concurrent modification exceptions during high-traffic ingestion
     private final Map<Long,List<long[]>> storeQueue;
     private final Map<Long,List<long[]>> deleteQueue;
     private final Map<Long,List<Long>> queryQueue;
@@ -68,18 +69,18 @@ public class PanakoStorageKV implements PanakoStorage {
             FileUtils.mkdirs(folder);
         }
         
-        // Environment tuned for high-performance NVMe nodes
+        // Environment tuned for high-performance nodes (125GB RAM / NVMe)
         env = org.lmdbjava.Env.create()
-                .setMapSize(1024L * 1024L * 1024L * 1024L) // 1 TB
+                .setMapSize(1024L * 1024L * 1024L * 1024L) // 1 TB Maximum
                 .setMaxDbs(2)
                 .setMaxReaders(Application.availableProcessors())
                 .open(new File(folder), 
-                    EnvFlags.MDB_NOSYNC,      // High speed: OS handles flush
-                    EnvFlags.MDB_NOMETASYNC,  // High speed: Skip metadata flush
-                    EnvFlags.MDB_NOTLS,       // Process-wide locking safety
-                    EnvFlags.MDB_NORDAHEAD);  // Optimized for random NVMe access
+                    EnvFlags.MDB_NOSYNC,      // Dramatically increases write speed; OS handles flushing
+                    EnvFlags.MDB_NOMETASYNC,  // Skip metadata sync for performance
+                    EnvFlags.MDB_NOTLS,       // Allows multi-threaded access without thread-local storage
+                    EnvFlags.MDB_NORDAHEAD);  // Disabled readahead: much more efficient for random NVMe lookups
         
-        // MDB_INTEGERKEY allows for optimized 8-byte key comparisons
+        // MDB_INTEGERKEY enables internal LMDB optimizations for 8-byte keys
         fingerprints = env.openDbi("panako_fingerprints", DbiFlags.MDB_CREATE, DbiFlags.MDB_INTEGERKEY, DbiFlags.MDB_DUPSORT, DbiFlags.MDB_DUPFIXED);
         resourceMap = env.openDbi("panako_resource_map", DbiFlags.MDB_CREATE, DbiFlags.MDB_INTEGERKEY);
         
@@ -95,7 +96,7 @@ public class PanakoStorageKV implements PanakoStorage {
     @Override
     public void storeMetadata(long resourceID, String resourcePath, float duration, int fingerprintsCount) {
         // LEGACY COMPATIBILITY: Do NOT set ByteOrder.LITTLE_ENDIAN. 
-        // This keeps the Big Endian keys used in your backup.
+        // We use Java's default (Big Endian) to match your existing backup.
         final ByteBuffer key = ByteBuffer.allocateDirect(8);
         
         byte[] resourcePathBytes = resourcePath.getBytes(StandardCharsets.UTF_8);
@@ -108,7 +109,8 @@ public class PanakoStorageKV implements PanakoStorage {
         
         resourceMap.put(key, val);
 
-        // RACE CONDITION FIX: Explicitly flush the store queue so C# finds it immediately
+        // RACE CONDITION FIX: Immediately flush the store queue for this thread
+        // This ensures the C# side finds the fingerprints immediately after metadata is stored.
         processStoreQueue();
     }
 
@@ -147,7 +149,7 @@ public class PanakoStorageKV implements PanakoStorage {
         if (queue == null || queue.isEmpty()) return;
         
         try (Txn<ByteBuffer> txn = env.txnWrite()) {
-            // Fingerprints were originally stored in Little Endian - must maintain this order
+            // Fingerprints were stored in Little Endian in the original code - we must keep this
             final ByteBuffer key = ByteBuffer.allocateDirect(8).order(ByteOrder.LITTLE_ENDIAN);
             final ByteBuffer val = ByteBuffer.allocateDirect(12);
             
@@ -260,14 +262,14 @@ public class PanakoStorageKV implements PanakoStorage {
         try (Txn<ByteBuffer> txn = env.txnRead()) {
             Stat stats = fingerprints.stat(txn);
             System.out.println("[MDB INDEX statistics]");
-            System.out.printf("> Total Key Entries: %d\n", stats.entries);
+            System.out.printf("> Total Fingerprint Hash Entries: %d\n", stats.entries);
             
             try (Cursor<ByteBuffer> c = resourceMap.openCursor(txn)) {
                 long totalResources = 0;
                 while(c.seek(SeekOp.MDB_NEXT)) {
                     totalResources++;
                 }
-                System.out.printf("> Total Track Records: %d\n", totalResources);
+                System.out.printf("> Total Metadata Records: %d\n", totalResources);
             }
         }
     }
@@ -290,7 +292,7 @@ public class PanakoStorageKV implements PanakoStorage {
         folder = FileUtils.expandHomeDir(folder);
         if(FileUtils.exists(folder)) {
             for(File f : new File(folder).listFiles()) {
-                if(f.getName().endsWith(".mdb")) {
+                if(f.getName().endsWith(".mdb") || f.getName().endsWith(".lock")) {
                     FileUtils.rm(f.getAbsolutePath());
                 }
             }

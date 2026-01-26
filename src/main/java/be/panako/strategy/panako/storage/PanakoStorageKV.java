@@ -17,8 +17,6 @@ import org.lmdbjava.GetOp;
 import org.lmdbjava.PutFlags;
 import org.lmdbjava.Txn;
 
-import be.panako.cli.Application;
-
 public class PanakoStorageKV implements PanakoStorage {
 
     private static PanakoStorageKV instance;
@@ -61,10 +59,9 @@ public class PanakoStorageKV implements PanakoStorage {
                     EnvFlags.MDB_NOTLS, 
                     EnvFlags.MDB_NORDAHEAD);
 
-        // REMOVED MDB_INTEGERKEY to prevent the "Store Issue" caused by index sort mismatch
-        // Kept DUPSORT as it is required for your fingerprint logic
-        fingerprints = env.openDbi("panako_fingerprints", DbiFlags.MDB_CREATE, DbiFlags.MDB_DUPSORT, DbiFlags.MDB_DUPFIXED);
-        resourceMap = env.openDbi("panako_resource_map", DbiFlags.MDB_CREATE);
+        // RE-ENABLED MDB_INTEGERKEY: Vital for query speed on large DBs (18GB+)
+        fingerprints = env.openDbi("panako_fingerprints", DbiFlags.MDB_CREATE, DbiFlags.MDB_INTEGERKEY, DbiFlags.MDB_DUPSORT, DbiFlags.MDB_DUPFIXED);
+        resourceMap = env.openDbi("panako_resource_map", DbiFlags.MDB_CREATE, DbiFlags.MDB_INTEGERKEY);
 
         storeQueue = new ConcurrentHashMap<>();
         deleteQueue = new ConcurrentHashMap<>();
@@ -74,10 +71,12 @@ public class PanakoStorageKV implements PanakoStorage {
     @Override
     public void storeMetadata(long resourceId, String url, float duration, int sampleRate) {
         try (Txn<ByteBuffer> txn = env.txnWrite()) {
+            // Key must be exactly 8 bytes for MDB_INTEGERKEY
             ByteBuffer key = ByteBuffer.allocateDirect(8).order(ByteOrder.LITTLE_ENDIAN);
             key.putLong(resourceId).flip();
             
             byte[] urlBytes = url != null ? url.getBytes() : new byte[0];
+            // Value: float(4) + int(4) + url bytes
             ByteBuffer value = ByteBuffer.allocateDirect(urlBytes.length + 8).order(ByteOrder.LITTLE_ENDIAN);
             value.putFloat(duration).putInt(sampleRate).put(urlBytes).flip();
             
@@ -93,9 +92,14 @@ public class PanakoStorageKV implements PanakoStorage {
         try (Txn<ByteBuffer> txn = env.txnRead()) {
             ByteBuffer key = ByteBuffer.allocateDirect(8).order(ByteOrder.LITTLE_ENDIAN);
             key.putLong(resourceId).flip();
+            
             ByteBuffer found = resourceMap.get(txn, key);
             if (found != null) {
-                return new PanakoResourceMetadata();
+                found.order(ByteOrder.LITTLE_ENDIAN);
+                PanakoResourceMetadata meta = new PanakoResourceMetadata();
+                meta.duration = found.getFloat();
+                meta.numFingerprints = found.getInt();
+                return meta;
             }
         }
         return null;
@@ -113,7 +117,7 @@ public class PanakoStorageKV implements PanakoStorage {
             for (Map.Entry<Long, List<long[]>> entry : storeQueue.entrySet()) {
                 long resourceId = entry.getKey();
                 for (long[] data : entry.getValue()) {
-                    // Using 4-byte hash as key in LITTLE_ENDIAN
+                    // Key: 4-byte hash (MDB_INTEGERKEY expects exactly 4 bytes for ints)
                     ByteBuffer key = ByteBuffer.allocateDirect(4).order(ByteOrder.LITTLE_ENDIAN);
                     key.putInt((int) data[0]).flip();
                     
@@ -158,10 +162,10 @@ public class PanakoStorageKV implements PanakoStorage {
                 key.putInt(hash.intValue()).flip();
                 
                 try (org.lmdbjava.Cursor<ByteBuffer> cursor = fingerprints.openCursor(txn)) {
+                    // MDB_SET is fast with INTEGERKEY
                     if (cursor.get(key, GetOp.MDB_SET)) {
                         do {
                             ByteBuffer val = cursor.val().order(ByteOrder.LITTLE_ENDIAN);
-                            // We MUST read in the same order we wrote
                             long resId = val.getLong();
                             int timestamp = val.getInt();
                             
@@ -177,6 +181,7 @@ public class PanakoStorageKV implements PanakoStorage {
         queryQueue.clear();
     }
 
+    @Override
     public void printStatistics(boolean verbose) {
         try (Txn<ByteBuffer> txn = env.txnRead()) {
             try (org.lmdbjava.Cursor<ByteBuffer> c = resourceMap.openCursor(txn)) {
@@ -188,14 +193,26 @@ public class PanakoStorageKV implements PanakoStorage {
                     if (!Float.isNaN(d) && d > 0) totalDur += d;
                     count++;
                 }
-                System.out.printf("Storage Stats: %d files, %.2f total hours indexed.\n", count, totalDur / 3600);
+                System.out.printf("[MDB INDEX TOTALS]\n");
+                System.out.printf("=========================\n");
+                System.out.printf("> %d audio files \n", count);
+                System.out.printf("> %.2f total hours indexed.\n", totalDur / 3600);
+                System.out.printf("=========================\n\n");
             }
         } catch (Exception e) {
             e.printStackTrace();
         }
     }
 
-    public void deleteMetadata(long resourceId) {}
+    public void deleteMetadata(long resourceId) {
+        try (Txn<ByteBuffer> txn = env.txnWrite()) {
+            ByteBuffer key = ByteBuffer.allocateDirect(8).order(ByteOrder.LITTLE_ENDIAN);
+            key.putLong(resourceId).flip();
+            resourceMap.delete(txn, key);
+            txn.commit();
+        }
+    }
+    
     public void clear() {}
     public void close() { 
         if(env != null) env.close(); 

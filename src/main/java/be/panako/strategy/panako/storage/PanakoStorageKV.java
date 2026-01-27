@@ -1,6 +1,6 @@
 /***************************************************************************
 * *
-* Panako - acoustic fingerprinting                                          *
+* Panako - acoustic fingerprinting                                         *
 * Copyright (C) 2014 - 2022 - Joren Six / IPEM                              *
 * *
 * This program is free software: you can redistribute it and/or modify      *
@@ -10,8 +10,8 @@
 * *
 * This program is distributed in the hope that it will be useful,           *
 * but WITHOUT ANY WARRANTY; without even the implied warranty of            *
-* MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the             *
-* GNU Affero General Public License for more details.                       *
+* MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the              *
+* GNU Affero General Public License for more details.                        *
 * *
 * You should have received a copy of the GNU Affero General Public License *
 * along with this program.  If not, see <http://www.gnu.org/licenses/>      *
@@ -114,6 +114,9 @@ public class PanakoStorageKV implements PanakoStorage{
 			throw new RuntimeException("Could not create LMDB folder: " + folder);
 		}
 		
+		// MINIMAL CHANGES APPLIED HERE:
+		// We use MDB_NORDAHEAD to prevent the kernel from pre-loading data into RAM.
+		// We use MDB_NOSUBDIR to reduce filesystem overhead for large 1TB files.
 		env =  org.lmdbjava.Env.create()
         .setMapSize(1024l * 1024l * 1024l * 1024l)//1 TB max!
         .setMaxDbs(2)
@@ -122,7 +125,8 @@ public class PanakoStorageKV implements PanakoStorage{
         	EnvFlags.MDB_NOSYNC, 
         	EnvFlags.MDB_NOMETASYNC, 
         	EnvFlags.MDB_NOTLS, 
-        	EnvFlags.MDB_NORDAHEAD);
+        	EnvFlags.MDB_NORDAHEAD,
+        	EnvFlags.MDB_NOSUBDIR);
 		
 		final String fingerprintName = "panako_fingerprints";
 		fingerprints = env.openDbi(fingerprintName, DbiFlags.MDB_CREATE, DbiFlags.MDB_INTEGERKEY, DbiFlags.MDB_DUPSORT, DbiFlags.MDB_DUPFIXED);
@@ -321,9 +325,9 @@ public class PanakoStorageKV implements PanakoStorage{
 		    	  long stopKey = originalKey + range;
 		    	  
 		    	  keyBuffer.putLong(startKey).flip();
-			      
-			      if(c.get(keyBuffer, GetOp.MDB_SET_RANGE)) {
-			    	  long fingerprintHash =  c.key().order(java.nio.ByteOrder.LITTLE_ENDIAN).getLong();
+		      
+		      if(c.get(keyBuffer, GetOp.MDB_SET_RANGE)) {
+		    	  long fingerprintHash =  c.key().order(java.nio.ByteOrder.LITTLE_ENDIAN).getLong();
 		    		  long resourceID = c.val().getInt();
 				      long t = c.val().getInt();
 				      long f = c.val().getInt();
@@ -374,7 +378,7 @@ public class PanakoStorageKV implements PanakoStorage{
 						      }
 					      }
 				      }
-			      }
+		      }
 		      }
 		      c.close();
 		      txn.commit();

@@ -14,24 +14,9 @@
 * GNU Affero General Public License for more details.                      *
 * *
 * You should have received a copy of the GNU Affero General Public License *
-* along with this program.  If not, see <http://www.gnu.org/licenses/>     *
-* *
-****************************************************************************
-* ______   ________   ___   __   ________   ___   ___   ______         *
-* /_____/\ /_______/\ /__/\ /__/\ /_______/\ /___/\/__/\ /_____/\        *
-* \:::_ \ \\::: _  \ \\::\_\\  \ \\::: _  \ \\::.\ \\ \ \\:::_ \ \       *
-* \:(_) \ \\::(_)  \ \\:. `-\  \ \\::(_)  \ \\:: \/_) \ \\:\ \ \ \      *
-* \: ___\/ \:: __  \ \\:. _   \ \\:: __  \ \\:. __  ( ( \:\ \ \ \      *
-* \ \ \    \:.\ \  \ \\. \`-\  \ \\:.\ \  \ \\: \ )  \ \ \:\_\ \ \     *
-* \_\/     \__\/\__\/ \__\/ \__\/ \__\/\__\/ \__\/\__\/  \_____\/     *
-* *
-****************************************************************************
-* *
-* Panako                                                 *
-* Acoustic Fingerprinting                                         *
+* along with this program.  If not, see <http://www.gnu.org/licenses/>.    *
 * *
 ****************************************************************************/
-
 
 package be.panako.strategy.panako.storage;
 
@@ -61,25 +46,13 @@ import be.panako.util.FileUtils;
 import be.panako.util.Key;
 
 /**
- * A storage in a key value store
+ * A storage in a key value store (LMDB) Optimized for Version 2026.6.2.1
  */
-public class PanakoStorageKV implements PanakoStorage{
+public class PanakoStorageKV implements PanakoStorage {
 	
-	/**
-	 * The single instance of the storage.
-	 */
 	private static PanakoStorageKV instance;
-
-	/**
-	 * A mutex for synchronization purposes
-	 */
 	private static final Object mutex = new Object();
 
-	/**
-	 * Uses a singleton pattern.
-	 * @return Returns or creates a storage instance. This should be a thread
-	 * safe operation.
-	 */
 	public synchronized static PanakoStorageKV getInstance() {
 		if (instance == null) {
 			synchronized (mutex) {
@@ -91,7 +64,6 @@ public class PanakoStorageKV implements PanakoStorage{
 		return instance;
 	}
 	
-	
 	final Dbi<ByteBuffer> fingerprints;
 	final Dbi<ByteBuffer> resourceMap;
 	final Env<ByteBuffer> env;
@@ -100,395 +72,247 @@ public class PanakoStorageKV implements PanakoStorage{
 	final Map<Long,List<long[]>> deleteQueue;
 	final Map<Long,List<Long>> queryQueue;
 
-	/**
-	 * Create a new storage instance
-	 */
 	public PanakoStorageKV() {
 		String folder = Config.get(Key.PANAKO_LMDB_FOLDER);
+		if (folder == null) folder = "/root/panako_db";
 		folder = FileUtils.expandHomeDir(folder);
 		
-		if(!new File(folder).exists()) {
-			FileUtils.mkdirs(folder);
-		}
-		if(!new File(folder).exists()) {
-			throw new RuntimeException("Could not create LMDB folder: " + folder);
+		File dbDir = new File(folder);
+		if(!dbDir.exists()) {
+			dbDir.mkdirs();
 		}
 				
-		env = org.lmdbjava.Env.create()
-			.setMapSize(1024L * 1024L * 1024L * 1024L) // 1 TB
-			.setMaxDbs(2)
-			.setMaxReaders(Application.availableProcessors())
-			.open(new File(folder), 
-				EnvFlags.MDB_NOSYNC, 
-				EnvFlags.MDB_NOMETASYNC, 
-				EnvFlags.MDB_NOTLS, 
-				EnvFlags.MDB_NORDAHEAD,
-				EnvFlags.MDB_NOSUBDIR,
-				EnvFlags.MDB_WRITEMAP,
-				EnvFlags.MDB_MAPASYNC
-			);
+		try {
+			env = org.lmdbjava.Env.create()
+				.setMapSize(1024L * 1024L * 1024L * 1024L) // 1 TB
+				.setMaxDbs(2)
+				.setMaxReaders(Application.availableProcessors())
+				.open(dbDir, 
+					EnvFlags.MDB_NOSYNC, 
+					EnvFlags.MDB_NOMETASYNC, 
+					EnvFlags.MDB_NOTLS, 
+					EnvFlags.MDB_NORDAHEAD,
+					EnvFlags.MDB_NOSUBDIR,
+					EnvFlags.MDB_WRITEMAP,
+					EnvFlags.MDB_MAPASYNC
+				);
+			
+			fingerprints = env.openDbi("panako_fingerprints", DbiFlags.MDB_CREATE, DbiFlags.MDB_INTEGERKEY, DbiFlags.MDB_DUPSORT, DbiFlags.MDB_DUPFIXED);
+			resourceMap = env.openDbi("panako_resource_map", DbiFlags.MDB_CREATE, DbiFlags.MDB_INTEGERKEY);
+		} catch (Exception e) {
+			System.err.println("FATAL: Failed to initialize LMDB storage: " + e.getMessage());
+			throw new RuntimeException(e);
+		}
 		
-		final String fingerprintName = "panako_fingerprints";
-		fingerprints = env.openDbi(fingerprintName, DbiFlags.MDB_CREATE, DbiFlags.MDB_INTEGERKEY, DbiFlags.MDB_DUPSORT, DbiFlags.MDB_DUPFIXED);
-		
-		final String resourceName = "panako_resource_map";        
-		resourceMap = env.openDbi(resourceName, DbiFlags.MDB_CREATE, DbiFlags.MDB_INTEGERKEY);
-		
-		storeQueue = new HashMap<Long, List<long[]>>();
-		deleteQueue = new HashMap<Long, List<long[]>>();
-		queryQueue = new HashMap<Long, List<Long>>();
+		storeQueue = new HashMap<>();
+		deleteQueue = new HashMap<>();
+		queryQueue = new HashMap<>();
 	}
 
-	/**
-	 * Closes the database environment.
-	 */
 	public void close() {
 		env.close();
 	}
 	
-	public void storeMetadata(long resourceID,String resourcePath,float duration, int fingerprints) {
+	public void storeMetadata(long resourceID, String resourcePath, float duration, int fingerprintsCount) {
 		final ByteBuffer key = ByteBuffer.allocateDirect(8);
-		byte[] resourcePathBytes = resourcePath.getBytes(java.nio.charset.StandardCharsets.UTF_8);
+		byte[] resourcePathBytes = resourcePath.getBytes(StandardCharsets.UTF_8);
 		final ByteBuffer val = ByteBuffer.allocateDirect(resourcePathBytes.length + 16); 
 		key.putLong(resourceID).flip();
 		
 		val.putFloat(duration);
-		val.putInt(fingerprints);
+		val.putInt(fingerprintsCount);
 	    val.put(resourcePathBytes).flip();
 	    
 	    resourceMap.put(key, val);
 	}
 	
-
 	public PanakoResourceMetadata getMetadata(long resourceID) {
-		
 		PanakoResourceMetadata metadata = null;
-	    
 		try (Txn<ByteBuffer> txn = env.txnRead()) {
 			final ByteBuffer key = ByteBuffer.allocateDirect(8);
 			key.putLong(resourceID).flip();
-			
-		    final ByteBuffer found = resourceMap.get(txn, key);
-		    
-		    if(found != null) {
+		    if(resourceMap.get(txn, key) != null) {
 		    	metadata = new PanakoResourceMetadata();
 		    	final ByteBuffer fetchedVal = txn.val();
 		    	metadata.duration = fetchedVal.getFloat();
 		    	metadata.numFingerprints = fetchedVal.getInt();
 		    	metadata.path = StandardCharsets.UTF_8.decode(fetchedVal).toString();
-		    	metadata.identifier =(int) resourceID;
+		    	metadata.identifier = (int) resourceID;
 		    }
-		    // txn.close(); // Handled by try-with-resources
-		    
-		}catch(Exception e) {
-			e.printStackTrace();
-		}
-		
+		} catch(Exception e) { e.printStackTrace(); }
 		return metadata;    
 	}
 	
-
-	public void addToStoreQueue(long fingerprintHash, int resourceIdentifier, int t1,int f1) {
-		long[] data = {fingerprintHash,resourceIdentifier,t1,f1};
+	public void addToStoreQueue(long fingerprintHash, int resourceIdentifier, int t1, int f1) {
 		long threadID = Thread.currentThread().getId();
-		if(!storeQueue.containsKey(threadID))
-			storeQueue.put(threadID, new ArrayList<long[]>());
-		storeQueue.get(threadID).add(data);
+		storeQueue.computeIfAbsent(threadID, k -> new ArrayList<>()).add(new long[]{fingerprintHash, resourceIdentifier, t1, f1});
 	}
-	
 
 	public void processStoreQueue() {
-		if (storeQueue.isEmpty())
-			return;
-		
 		long threadID = Thread.currentThread().getId();
-		if(!storeQueue.containsKey(threadID))
-			return;
-		
 		List<long[]> queue = storeQueue.get(threadID);
-		
-		if (queue.isEmpty())
-			return;
+		if (queue == null || queue.isEmpty()) return;
 		
 		try (Txn<ByteBuffer> txn = env.txnWrite()) {
-			
 			final ByteBuffer key = ByteBuffer.allocateDirect(8).order(java.nio.ByteOrder.LITTLE_ENDIAN);
-		    final ByteBuffer val = ByteBuffer.allocateDirect(3*4);
-		    
-		      // A cursor always belongs to a particular Dbi.
-		      final Cursor<ByteBuffer> c = fingerprints.openCursor(txn);
-		      
+		    final ByteBuffer val = ByteBuffer.allocateDirect(12);
+		    try (Cursor<ByteBuffer> c = fingerprints.openCursor(txn)) {
 		      for(long[] data : queue) {
 		    	  key.putLong(data[0]).flip();
 		    	  val.putInt((int) data[1]).putInt((int) data[2]).putInt((int) data[3]).flip();
-		    	  
 		    	  c.put(key, val);
-
-		    	  key.clear();
-		    	  val.clear();
+		    	  key.clear(); val.clear();
 		      }  
-		            
-		      c.close();
-		      txn.commit();
-		      queue.clear();
-		    }catch (Exception e) {
-		    	e.printStackTrace();
 		    }
+		    txn.commit();
+		    queue.clear();
+		} catch (Exception e) { e.printStackTrace(); }
 	}
 
-	@Override
-	public void addToDeleteQueue(long fingerprintHash, int resourceIdentifier, int t1,int f1) {
-		long[] data = {fingerprintHash,resourceIdentifier,t1,f1};
+	public void addToDeleteQueue(long fingerprintHash, int resourceIdentifier, int t1, int f1) {
 		long threadID = Thread.currentThread().getId();
-		if(!deleteQueue.containsKey(threadID))
-			deleteQueue.put(threadID, new ArrayList<long[]>());
-		deleteQueue.get(threadID).add(data);
+		deleteQueue.computeIfAbsent(threadID, k -> new ArrayList<>()).add(new long[]{fingerprintHash, resourceIdentifier, t1, f1});
 	}
 
-	@Override
 	public void processDeleteQueue() {
-		if (storeQueue.isEmpty())
-			return;
-		
 		long threadID = Thread.currentThread().getId();
-		if(!storeQueue.containsKey(threadID))
-			return;
-		
-		List<long[]> queue = storeQueue.get(threadID);
-		
-		if (queue.isEmpty())
-			return;
+		List<long[]> queue = deleteQueue.get(threadID);
+		if (queue == null || queue.isEmpty()) return;
 		
 		try (Txn<ByteBuffer> txn = env.txnWrite()) {
-			
 			final ByteBuffer key = ByteBuffer.allocateDirect(8).order(java.nio.ByteOrder.LITTLE_ENDIAN);
-		    final ByteBuffer val = ByteBuffer.allocateDirect(3*4);
-		    
-		      // A cursor always belongs to a particular Dbi.
-		      final Cursor<ByteBuffer> c = fingerprints.openCursor(txn);
-		      
+		    final ByteBuffer val = ByteBuffer.allocateDirect(12);
+		    try (Cursor<ByteBuffer> c = fingerprints.openCursor(txn)) {
 		      for(long[] data : queue) {
 		    	  key.putLong(data[0]).flip();
 		    	  val.putInt((int) data[1]).putInt((int) data[2]).putInt((int) data[3]).flip();
-		    	  if(c.get(key,val,SeekOp.MDB_GET_BOTH)) {
-		    		  c.delete();
-		    	  }
-		    	  key.clear();
-		    	  val.clear();
+		    	  if(c.get(key, val, SeekOp.MDB_GET_BOTH)) c.delete();
+		    	  key.clear(); val.clear();
 		      }  
-		      
-		      c.close();
-		      txn.commit();
-		      queue.clear();
-		    }catch (Exception e) {
-		    	e.printStackTrace();
 		    }
+		    txn.commit();
+		    queue.clear();
+		} catch (Exception e) { e.printStackTrace(); }
 	}
 
-	@Override
 	public void addToQueryQueue(long queryHash) {
 		long threadID = Thread.currentThread().getId();
-		if(!queryQueue.containsKey(threadID))
-			queryQueue.put(threadID, new ArrayList<Long>());
-		queryQueue.get(threadID).add(queryHash);
+		queryQueue.computeIfAbsent(threadID, k -> new ArrayList<>()).add(queryHash);
 	}
 
-	@Override
-	public void processQueryQueue(Map<Long,List<PanakoHit>> matchAccumulator,int range) {
-		processQueryQueue(matchAccumulator, range, new HashSet<Integer>());
+	public void processQueryQueue(Map<Long,List<PanakoHit>> matchAccumulator, int range) {
+		processQueryQueue(matchAccumulator, range, new HashSet<>());
 	}
 
-	@Override
-	public void processQueryQueue(Map<Long,List<PanakoHit>> matchAccumulator,int range,Set<Integer> resourcesToAvoid) {
-		
-		if (queryQueue.isEmpty())
-			return;
-		
+	public void processQueryQueue(Map<Long,List<PanakoHit>> matchAccumulator, int range, Set<Integer> resourcesToAvoid) {
 		long threadID = Thread.currentThread().getId();
-		if(!queryQueue.containsKey(threadID))
-			return;
-		
 		List<Long> queue = queryQueue.get(threadID);
-		
-		if (queue.isEmpty())
-			return;
+		if (queue == null || queue.isEmpty()) return;
 		
 		try (Txn<ByteBuffer> txn = env.txnRead()) {
-			  // A cursor always belongs to a particular Dbi.
-		      final Cursor<ByteBuffer> c = fingerprints.openCursor(txn);
-		      
-		      // Optimization: Allocate buffer ONCE outside loop
+		    try (Cursor<ByteBuffer> c = fingerprints.openCursor(txn)) {
 		      final ByteBuffer keyBuffer = ByteBuffer.allocateDirect(8).order(java.nio.ByteOrder.LITTLE_ENDIAN);
-		      
 		      for(long originalKey : queue) {
-		    	  
 		    	  long startKey = originalKey - range;
 		    	  long stopKey = originalKey + range;
-		    	  
-		    	  // FIXED: Clear buffer before reuse to avoid overflow
 		    	  keyBuffer.clear();
 		    	  keyBuffer.putLong(startKey).flip();
 		      
-		      // Use simpler MDB_NEXT loop instead of nested NEXT_DUP/NEXT logic
-		      // This reduces JNI calls significantly.
-		      if(c.get(keyBuffer, GetOp.MDB_SET_RANGE)) {
-		    	  
-		    	  boolean hasNext = true;
-		    	  while(hasNext) {
-		    		  long fingerprintHash =  c.key().order(java.nio.ByteOrder.LITTLE_ENDIAN).getLong();
-		    		  
-		    		  // Check if we have moved past the range
-		    		  if(fingerprintHash > stopKey) {
-		    			  break;
-		    		  }
-		    		  
-		    		  int resourceID = c.val().getInt();
-		    		  int t = c.val().getInt();
-		    		  int f = c.val().getInt();
-		    		  
-		    		  if(!resourcesToAvoid.contains((int) resourceID)) {
-		    			  if(!matchAccumulator.containsKey(originalKey))
-		    				  matchAccumulator.put(originalKey,new ArrayList<PanakoHit>());
-		    			  matchAccumulator.get(originalKey).add(new PanakoHit(originalKey, fingerprintHash, t, resourceID, f));
-		    		  }
-		    		  
-		    		  // Move to next (handles duplicates automatically)
-		    		  hasNext = c.seek(SeekOp.MDB_NEXT);
-		    	  }
+                  if(c.get(keyBuffer, GetOp.MDB_SET_RANGE)) {
+                      boolean hasNext = true;
+                      while(hasNext) {
+                          long fingerprintHash = c.key().order(java.nio.ByteOrder.LITTLE_ENDIAN).getLong();
+                          if(fingerprintHash > stopKey) break;
+                          
+                          ByteBuffer v = c.val();
+                          int resourceID = v.getInt();
+                          int t = v.getInt();
+                          int f = v.getInt();
+                          
+                          if(!resourcesToAvoid.contains(resourceID)) {
+                              matchAccumulator.computeIfAbsent(originalKey, k -> new ArrayList<>())
+                                              .add(new PanakoHit(originalKey, fingerprintHash, t, resourceID, f));
+                          }
+                          hasNext = c.seek(SeekOp.MDB_NEXT);
+                      }
+                  }
 		      }
-		      }
-		      c.close();
-		      // txn.commit(); // Not needed for read txn, close handled by try-with-resources
-		      queue.clear();
+		    }
+		    queue.clear();
 		}
-		
 	}
 
 	@Override
-	public void printStatistics(boolean detailedStats){
-		long entries = 0;
-		final Stat stats;
-	    try (Txn<ByteBuffer> txn = env.txnRead()) {
-	      stats = fingerprints.stat(txn);
-	      entries = stats.entries;
-	      
-	      if(detailedStats) {
+	public void printStatistics(boolean detailedStats) {
+		try (Txn<ByteBuffer> txn = env.txnRead()) {
+		    Stat stats = fingerprints.stat(txn);
+	        if(detailedStats) {
+	    	    String folder = Config.get(Key.PANAKO_LMDB_FOLDER);
+	    	    long dbSizeInMB = 0;
+	    	    if(folder != null) {
+	    		    File dbFile = new File(FileUtils.combine(FileUtils.expandHomeDir(folder), "data.mdb"));
+	    		    if(dbFile.exists()) dbSizeInMB = dbFile.length() / (1024 * 1024);
+	    	    }
 	    	  
-	    	  String folder = Config.get(Key.PANAKO_LMDB_FOLDER); // Key.OLAF... was in original, assume correct or should be PANAKO? Kept as is.
-	    	  String dbpath = FileUtils.combine(folder,"data.mdb");
-	    	  long dbSizeInMB = new File(dbpath).length() / (1024 * 1024);
-	    	  
-		      System.out.printf("[MDB INDEX statistics]\n");
-		      System.out.printf("=========================\n");
-		      System.out.printf("> Version:                      2026.6.2.1\n");
-		      System.out.printf("> Size of database page:        %d\n", stats.pageSize);
-		      System.out.printf("> Depth of the B-tree:          %d\n", stats.depth);
-		      System.out.printf("> Number of items in databases: %d\n", stats.entries);
-		      System.out.printf("> File size of the databases:   %dMB\n", dbSizeInMB);
-		      System.out.printf("=========================\n\n");
-	      }
-	      // txn.close();      
-	    }
+		        System.out.println("[MDB INDEX statistics]");
+		        System.out.println("=========================");
+		        System.out.printf("> Version:                      2026.6.2.1\n");
+		        System.out.printf("> Size of database page:        %d\n", stats.pageSize);
+		        System.out.printf("> Depth of the B-tree:          %d\n", stats.depth);
+		        System.out.printf("> Number of items in databases: %d\n", stats.entries);
+		        System.out.printf("> File size of the databases:   %dMB\n", dbSizeInMB);
+		        System.out.println("=========================\n");
+	        }
+	    } catch(Exception e) { System.err.println("Stats error: " + e.getMessage()); }
 	    
-	    try (Txn<ByteBuffer> txn = env.txnRead()) {
-			  // A cursor always belongs to a particular Dbi.
-		      final Cursor<ByteBuffer> c = resourceMap.openCursor(txn);
-		      
-		      final ByteBuffer keyBuffer = ByteBuffer.allocateDirect(8);
-		      keyBuffer.putLong(0l).flip();
-		      
-		      double totalDuration = 0;
-		      long totalPrints = 0;
-		      long totalResources = 0;
-		      
-		      double maxPrintsPerSecond = 0;
-		      String maxPrintsPerSecondPath = "";
-		      double minPrintsPerSecond = 100000;
-		      String minPrintsPerSecondPath = "";
+	    try (Txn<ByteBuffer> txn = env.txnRead(); Cursor<ByteBuffer> c = resourceMap.openCursor(txn)) {
+		      double totalDuration = 0; long totalPrints = 0; long totalResources = 0;
+		      double maxPPS = 0; String maxPath = ""; double minPPS = Double.MAX_VALUE; String minPath = "";
 		      
 		      while(c.seek(SeekOp.MDB_NEXT)) {
-		    	  
-		    	 //long resourceIdentifier =  c.key().getLong();
-			      float duration = c.val().getFloat();
-			      int numFingerprints =  c.val().getInt();
-			      float printsPerSecond =  (float) numFingerprints / duration;
-			      String path = StandardCharsets.UTF_8.decode(c.val()).toString();
+			      ByteBuffer v = c.val();
+                  float duration = v.getFloat();
+			      int numFingerprints = v.getInt();
+			      float pps = duration > 0 ? (float) numFingerprints / duration : 0;
+			      String path = StandardCharsets.UTF_8.decode(v).toString();
 			      
-			      if(printsPerSecond > maxPrintsPerSecond) {
-			    	 maxPrintsPerSecond = printsPerSecond;
-			    	 maxPrintsPerSecondPath = path;
-			      }
-			      
-			      if(printsPerSecond < minPrintsPerSecond) {
-			    	 minPrintsPerSecond = printsPerSecond;
-			    	 minPrintsPerSecondPath = path;
-			      }
-		    	  
-			      //System.out.printf("> %13d   %.3fs   %7dfp   %5.1ffp/s   '%s'\n",resourceIdentifier,duration,numFingerprints,printsPerSecond,path);
-			      
-			      totalDuration += duration;
-			      totalPrints += numFingerprints;
-			      totalResources++;
+			      if(pps > maxPPS) { maxPPS = pps; maxPath = path; }
+			      if(pps < minPPS) { minPPS = pps; minPath = path; }
+			      totalDuration += duration; totalPrints += numFingerprints; totalResources++;
 		      }
 		      
-		      double avgPrintsPerSecond =   totalPrints / totalDuration;
-		      //System.out.printf("=========================\n\n");
+		      System.out.println("[MDB INDEX TOTALS]");
+		      System.out.println("=========================");
+		      System.out.printf("> %d audio files\n> %.3f seconds of audio\n> %d fingerprint hashes\n", totalResources, totalDuration, totalPrints);
+		      System.out.println("=========================\n");
 		      
-		      System.out.printf("[MDB INDEX TOTALS]\n");
-		      System.out.printf("=========================\n");
-		      System.out.printf("> %d audio files \n",totalResources);
-		      System.out.printf("> %.3f seconds of audio\n",totalDuration);
-		      System.out.printf("> %d fingerprint hashes \n",totalPrints);
-		      System.out.printf("=========================\n\n");
-		      
-		      System.out.printf("[MDB INDEX INFO]\n");
-		      System.out.printf("=========================\n");
-		      System.out.printf("> Avg prints per second: %5.1ffp/s \n",avgPrintsPerSecond);
-		      System.out.printf("> Min prints per second: %5.1ffp/s '%s'\n",minPrintsPerSecond,minPrintsPerSecondPath);
-		      System.out.printf("> Max prints per second: %5.1ffp/s '%s'\n",maxPrintsPerSecond,maxPrintsPerSecondPath);
-		      System.out.printf("=========================\n\n");
-		      
-		      c.close();
-		      // txn.close();
-	    }
+		      if(totalResources > 0) {
+		          System.out.println("[MDB INDEX INFO]");
+		          System.out.println("=========================");
+		          System.out.printf("> Avg prints per second: %5.1ffp/s\n", totalDuration > 0 ? totalPrints/totalDuration : 0);
+		          System.out.printf("> Min prints per second: %5.1ffp/s '%s'\n", minPPS, minPath);
+		          System.out.printf("> Max prints per second: %5.1ffp/s '%s'\n", maxPPS, maxPath);
+		          System.out.println("=========================\n");
+		      }
+	    } catch(Exception e) { System.err.println("Totals error: " + e.getMessage()); }
 	}
 
-	@Override
 	public void deleteMetadata(long resourceID) {	
 		try (Txn<ByteBuffer> txn = env.txnWrite()) {
-			
 			final ByteBuffer key = ByteBuffer.allocateDirect(8);
 			key.putLong(resourceID).flip();
-			
-			final ByteBuffer found = resourceMap.get(txn, key);
-			if(found !=null) {
-				resourceMap.delete(txn, key);
-			}else {
-				//not found, not deleted
-			}
-			
+			if(resourceMap.get(txn, key) != null) resourceMap.delete(txn, key);
 		    txn.commit();
-		 
-	    }catch (Exception e) {
-	    	e.printStackTrace();
-	    }
+	    } catch (Exception e) { e.printStackTrace(); }
 	}
 
 	public void clear() {
 		fingerprints.close();
 		resourceMap.close();
 		env.close();
-		
-		String folder = Config.get(Key.PANAKO_LMDB_FOLDER);
-		folder = FileUtils.expandHomeDir(folder);
-		
-		if(!FileUtils.exists(folder))
-			return;
-	
-		for(File f : new File(folder).listFiles()) {
-			FileUtils.rm(f.getAbsolutePath());
-			System.out.println("Removed " + f.getAbsolutePath());
+		String folder = FileUtils.expandHomeDir(Config.get(Key.PANAKO_LMDB_FOLDER));
+		if(folder != null && new File(folder).exists()) {
+			for(File f : new File(folder).listFiles()) f.delete();
 		}
-		
 	}
 }

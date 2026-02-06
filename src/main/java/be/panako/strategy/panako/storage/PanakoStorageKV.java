@@ -1,36 +1,36 @@
-@ -1,508 +1,508 @@
+@ -1,516 +1,516 @@
 /***************************************************************************
-*                                                                          *
+* *
 * Panako - acoustic fingerprinting                                         *
-* Copyright (C) 2014 - 2022 - Joren Six / IPEM                             *
-*                                                                          *
-* This program is free software: you can redistribute it and/or modify     *
-* it under the terms of the GNU Affero General Public License as           *
-* published by the Free Software Foundation, either version 3 of the       *
-* License, or (at your option) any later version.                          *
-*                                                                          *
-* This program is distributed in the hope that it will be useful,          *
-* but WITHOUT ANY WARRANTY; without even the implied warranty of           *
-* MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the            *
-* GNU Affero General Public License for more details.                      *
-*                                                                          *
+* Copyright (C) 2014 - 2022 - Joren Six / IPEM                              *
+* *
+* This program is free software: you can redistribute it and/or modify      *
+* it under the terms of the GNU Affero General Public License as            *
+* published by the Free Software Foundation, either version 3 of the        *
+* License, or (at your option) any later version.                           *
+* *
+* This program is distributed in the hope that it will be useful,           *
+* but WITHOUT ANY WARRANTY; without even the implied warranty of            *
+* MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the              *
+* GNU Affero General Public License for more details.                        *
+* *
 * You should have received a copy of the GNU Affero General Public License *
-* along with this program.  If not, see <http://www.gnu.org/licenses/>     *
-*                                                                          *
+* along with this program.  If not, see <http://www.gnu.org/licenses/>      *
+* *
 ****************************************************************************
-*    ______   ________   ___   __    ________   ___   ___   ______         *
-*   /_____/\ /_______/\ /__/\ /__/\ /_______/\ /___/\/__/\ /_____/\        *
-*   \:::_ \ \\::: _  \ \\::\_\\  \ \\::: _  \ \\::.\ \\ \ \\:::_ \ \       *
-*    \:(_) \ \\::(_)  \ \\:. `-\  \ \\::(_)  \ \\:: \/_) \ \\:\ \ \ \      *
-*     \: ___\/ \:: __  \ \\:. _    \ \\:: __  \ \\:. __  ( ( \:\ \ \ \     *
-*      \ \ \    \:.\ \  \ \\. \`-\  \ \\:.\ \  \ \\: \ )  \ \ \:\_\ \ \    *
-*       \_\/     \__\/\__\/ \__\/ \__\/ \__\/\__\/ \__\/\__\/  \_____\/    *
-*                                                                          *
+* ______   ________   ___   __   ________   ___   ___   ______         *
+* /_____/\ /_______/\ /__/\ /__/\ /_______/\ /___/\/__/\ /_____/\        *
+* \:::_ \ \\::: _  \ \\::\_\\  \ \\::: _  \ \\::.\ \\ \ \\:::_ \ \       *
+* \:(_) \ \\::(_)  \ \\:. `-\  \ \\::(_)  \ \\:: \/_) \ \\:\ \ \ \      *
+* \: ___\/ \:: __  \ \\:. _   \ \\:: __  \ \\:. __  ( ( \:\ \ \ \     *
+* \ \ \    \:.\ \  \ \\. \`-\  \ \\:.\ \  \ \\: \ )  \ \ \:\_\ \ \    *
+* \_\/     \__\/\__\/ \__\/ \__\/ \__\/\__\/ \__\/\__\/  \_____\/    *
+* *
 ****************************************************************************
-*                                                                          *
-*                              Panako                                      *
-*                       Acoustic Fingerprinting                            *
-*                                                                          *
+* *
+* Panako                                      *
+* Acoustic Fingerprinting                            *
+* *
 ****************************************************************************/
 
 
@@ -50,6 +50,7 @@ import org.lmdbjava.Cursor;
 import org.lmdbjava.Dbi;
 import org.lmdbjava.DbiFlags;
 import org.lmdbjava.Env;
+import org.lmdbjava.EnvFlags;
 import org.lmdbjava.GetOp;
 import org.lmdbjava.SeekOp;
 import org.lmdbjava.Stat;
@@ -78,7 +79,7 @@ public class PanakoStorageKV implements PanakoStorage{
 	/**
 	 * Uses a singleton pattern.
 	 * @return Returns or creates a storage instance. This should be a thread
-	 *         safe operation.
+	 * safe operation.
 	 */
 	public synchronized static PanakoStorageKV getInstance() {
 		if (instance == null) {
@@ -113,22 +114,30 @@ public class PanakoStorageKV implements PanakoStorage{
 		if(!new File(folder).exists()) {
 			throw new RuntimeException("Could not create LMDB folder: " + folder);
 		}
-		
-		env =  org.lmdbjava.Env.create()
-        .setMapSize(1024l * 1024l * 1024l * 1024l)//1 TB max!
-        .setMaxDbs(2)
-        .setMaxReaders(Application.availableProcessors())
-        .open(new File(folder), org.lmdbjava.EnvFlags.MDB_WRITEMAP, org.lmdbjava.EnvFlags.MDB_MAPASYNC);
+				
+		env = org.lmdbjava.Env.create()
+			.setMapSize(1024L * 1024L * 1024L * 1024L) // 1 TB
+			.setMaxDbs(2)
+			.setMaxReaders(Application.availableProcessors())
+			.open(new File(folder), 
+				EnvFlags.MDB_NOSYNC, 
+				EnvFlags.MDB_NOMETASYNC, 
+				EnvFlags.MDB_NOTLS, 
+				EnvFlags.MDB_NORDAHEAD,
+				EnvFlags.MDB_NOSUBDIR,
+				EnvFlags.MDB_WRITEMAP,
+				EnvFlags.MDB_MAPASYNC
+			);
 		
 		final String fingerprintName = "panako_fingerprints";
 		fingerprints = env.openDbi(fingerprintName, DbiFlags.MDB_CREATE, DbiFlags.MDB_INTEGERKEY, DbiFlags.MDB_DUPSORT, DbiFlags.MDB_DUPFIXED);
 		
-		final String resourceName = "panako_resource_map";		
-		resourceMap = env.openDbi(resourceName,DbiFlags.MDB_CREATE, DbiFlags.MDB_INTEGERKEY);
+		final String resourceName = "panako_resource_map";        
+		resourceMap = env.openDbi(resourceName, DbiFlags.MDB_CREATE, DbiFlags.MDB_INTEGERKEY);
 		
-		storeQueue = new HashMap<Long,List<long[]>>();
-		deleteQueue = new HashMap<Long,List<long[]>>();
-		queryQueue = new HashMap<Long,List<Long>>();
+		storeQueue = new HashMap<Long, List<long[]>>();
+		deleteQueue = new HashMap<Long, List<long[]>>();
+		queryQueue = new HashMap<Long, List<Long>>();
 	}
 
 	/**
@@ -317,9 +326,9 @@ public class PanakoStorageKV implements PanakoStorage{
 		    	  long stopKey = originalKey + range;
 		    	  
 		    	  keyBuffer.putLong(startKey).flip();
-			      
-			      if(c.get(keyBuffer, GetOp.MDB_SET_RANGE)) {
-			    	  long fingerprintHash =  c.key().order(java.nio.ByteOrder.LITTLE_ENDIAN).getLong();
+		      
+		      if(c.get(keyBuffer, GetOp.MDB_SET_RANGE)) {
+		    	  long fingerprintHash =  c.key().order(java.nio.ByteOrder.LITTLE_ENDIAN).getLong();
 		    		  long resourceID = c.val().getInt();
 				      long t = c.val().getInt();
 				      long f = c.val().getInt();
@@ -370,7 +379,7 @@ public class PanakoStorageKV implements PanakoStorage{
 						      }
 					      }
 				      }
-			      }
+		      }
 		      }
 		      c.close();
 		      txn.commit();

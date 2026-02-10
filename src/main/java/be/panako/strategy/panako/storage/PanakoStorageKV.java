@@ -17,28 +17,29 @@
 * along with this program.  If not, see <http://www.gnu.org/licenses/>      *
 * *
 ****************************************************************************
-* ______   ________   ___   __   ________   ___   ___   ______         *
-* /_____/\ /_______/\ /__/\ /__/\ /_______/\ /___/\/__/\ /_____/\        *
-* \:::_ \ \\::: _  \ \\::\_\\  \ \\::: _  \ \\::.\ \\ \ \\:::_ \ \       *
-* \:(_) \ \\::(_)  \ \\:. `-\  \ \\::(_)  \ \\:: \/_) \ \\:\ \ \ \      *
-* \: ___\/ \:: __  \ \\:. _   \ \\:: __  \ \\:. __  ( ( \:\ \ \ \     *
-* \ \ \    \:.\ \  \ \\. \`-\  \ \\:.\ \  \ \\: \ )  \ \ \:\_\ \ \    *
-* \_\/     \__\/\__\/ \__\/ \__\/ \__\/\__\/ \__\/\__\/  \_____\/    *
+* ______    ________    ___    __    ________    ___    ___    ______     *
+* /_____/\  /_______/\  /__/\  /__/\  /_______/\  /___/\ /__/\  /_____/\    *
+* \:::_ \ \ \::: _  \ \ \::\_\\  \ \ \::: _  \ \ \::.\ \\ \ \ \:::_ \ \    *
+* \:(_) \ \ \::(_)  \ \ \:. `-\  \ \ \::(_)  \ \ \:: \/_) \ \ \:\ \ \ \   *
+* \: ___\/  \:: __  \ \ \:. _    \ \ \:: __  \ \ \:. __    ( ( \:\ \ \ \  *
+* \ \ \     \:.\ \  \ \ \. \`-\  \ \ \:.\ \  \ \ \: \ )  \ \ \ \:\_\ \ \ *
+* \_\/      \__\/\__\/  \__\/ \__\/  \__\/\__\/  \__\/\__\/   \_____\/ *
 * *
 ****************************************************************************
 * *
-* Panako                                      *
-* Acoustic Fingerprinting                            *
+* Panako                                                                  *
+* Acoustic Fingerprinting                                                 *
 * *
 ****************************************************************************/
-
 
 package be.panako.strategy.panako.storage;
 
 import java.io.File;
 import java.nio.ByteBuffer;
+import java.nio.ByteOrder; // ADDED
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
+import java.util.Collections; // ADDED
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
@@ -302,31 +303,26 @@ public class PanakoStorageKV implements PanakoStorage{
 		List<Long> queue = queryQueue.get(Thread.currentThread().getId());
 		if (queue == null || queue.isEmpty()) return;
 
-		// SORTING is huge—keep this. It transforms random I/O into a single "sweep" of the NVMe.
+		// This requires java.util.Collections
 		Collections.sort(queue);
 
 		try (Txn<ByteBuffer> txn = env.txnRead(); Cursor<ByteBuffer> c = fingerprints.openCursor(txn)) {
-			// REUSE this buffer. Do not allocate inside the loop.
+			// This requires java.nio.ByteOrder
 			final ByteBuffer keyBuffer = ByteBuffer.allocateDirect(8).order(ByteOrder.LITTLE_ENDIAN);
 
 			for (long originalKey : queue) {
 				long startKey = originalKey - range;
 				long stopKey = originalKey + range;
 
-				keyBuffer.clear(); // Use clear() instead of re-allocating
+				keyBuffer.clear(); 
 				keyBuffer.putLong(startKey).flip();
 
-				// Seek to the first key >= startKey
 				if (c.get(keyBuffer, GetOp.MDB_SET_RANGE)) {
 					while (true) {
-						// Retrieve the current key the cursor is pointing at
 						long foundHash = c.key().order(ByteOrder.LITTLE_ENDIAN).getLong();
 
-						// If we are past the stopKey, stop scanning this range
 						if (foundHash > stopKey) break;
 
-						// MDB_NEXT_DUP is very fast for MDB_DUPFIXED (your flag)
-						// because it doesn't re-parse the B-tree branch.
 						do {
 							ByteBuffer v = c.val();
 							int resourceID = v.getInt();
@@ -339,7 +335,6 @@ public class PanakoStorageKV implements PanakoStorage{
 							}
 						} while (c.seek(SeekOp.MDB_NEXT_DUP));
 
-						// Efficiency Win: Only move to the next key if we haven't reached the end
 						if (!c.seek(SeekOp.MDB_NEXT_NODUP)) break; 
 					}
 				}
@@ -360,14 +355,14 @@ public class PanakoStorageKV implements PanakoStorage{
 	      
 	      if(detailedStats) {
 	    	  
-	    	  String folder = Config.get(Key.OLAF_LMDB_FOLDER);
+	    	  String folder = Config.get(Key.PANAKO_LMDB_FOLDER);
 	    	  String dbpath = FileUtils.combine(folder,"data.mdb");
 	    	  long dbSizeInMB = new File(dbpath).length() / (1024 * 1024);
 	    	  
 		      System.out.printf("[MDB INDEX statistics]\n");
 		      System.out.printf("=========================\n");
-		      System.out.printf("> Size of database page:        %d\n", stats.pageSize);
-		      System.out.printf("> Depth of the B-tree:          %d\n", stats.depth);
+		      System.out.printf("> Size of database page:         %d\n", stats.pageSize);
+		      System.out.printf("> Depth of the B-tree:           %d\n", stats.depth);
 		      System.out.printf("> Number of items in databases: %d\n", stats.entries);
 		      System.out.printf("> File size of the databases:   %dMB\n", dbSizeInMB);
 		      System.out.printf("=========================\n\n");
@@ -419,7 +414,7 @@ public class PanakoStorageKV implements PanakoStorage{
 		      double avgPrintsPerSecond =   totalPrints / totalDuration;
 		      //System.out.printf("=========================\n\n");
 		      
-			  System.out.printf("[PANAKO version 2026.2.6.1]\n");
+			  System.out.printf("[PANAKO version 2026.2.10.1]\n");
 		      System.out.printf("[MDB INDEX TOTALS]\n");
 		      System.out.printf("=========================\n");
 		      System.out.printf("> %d audio files \n",totalResources);

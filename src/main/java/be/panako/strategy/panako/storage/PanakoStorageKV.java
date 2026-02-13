@@ -123,7 +123,7 @@ public class PanakoStorageKV implements PanakoStorage{
         	EnvFlags.MDB_NOSYNC, 
             EnvFlags.MDB_NOMETASYNC, 
             EnvFlags.MDB_NOTLS, 
-            EnvFlags.MDB_NORDAHEAD,
+            //EnvFlags.MDB_NORDAHEAD,
             EnvFlags.MDB_WRITEMAP,  // Direct write to memory map
             EnvFlags.MDB_MAPASYNC   // Asynchronous map flushing
 			);

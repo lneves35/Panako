@@ -414,7 +414,7 @@ public class PanakoStorageKV implements PanakoStorage{
 		      double avgPrintsPerSecond =   totalPrints / totalDuration;
 		      //System.out.printf("=========================\n\n");
 		      
-			  System.out.printf("[PANAKO version 2026.2.10.1]\n");
+			  System.out.printf("[PANAKO version 2026.2.13.1]\n");
 		      System.out.printf("[MDB INDEX TOTALS]\n");
 		      System.out.printf("=========================\n");
 		      System.out.printf("> %d audio files \n",totalResources);

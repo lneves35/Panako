@@ -123,7 +123,7 @@ public class PanakoStorageKV implements PanakoStorage{
         	EnvFlags.MDB_NOSYNC, 
             EnvFlags.MDB_NOMETASYNC, 
             EnvFlags.MDB_NOTLS, 
-            //EnvFlags.MDB_NORDAHEAD,
+            EnvFlags.MDB_NORDAHEAD,
             EnvFlags.MDB_WRITEMAP,  // Direct write to memory map
             EnvFlags.MDB_MAPASYNC   // Asynchronous map flushing
 			);
@@ -414,7 +414,7 @@ public class PanakoStorageKV implements PanakoStorage{
 		      double avgPrintsPerSecond =   totalPrints / totalDuration;
 		      //System.out.printf("=========================\n\n");
 		      
-			  System.out.printf("[PANAKO version 2026.2.13.1]\n");
+			  System.out.printf("[PANAKO version 2026.2.13.2]\n");
 		      System.out.printf("[MDB INDEX TOTALS]\n");
 		      System.out.printf("=========================\n");
 		      System.out.printf("> %d audio files \n",totalResources);
